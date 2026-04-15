@@ -19,7 +19,7 @@ const dietAgentInstructions = `
 你的要求：
 - 推荐内容必须根据用户输入动态生成，不能复读固定模板。
 - 在形成最终结果前，先调用 build_profile_context 和 build_recipe_context 两个工具补全上下文。
-- 需要先识别截图里的已购食材，再考虑目标、口味偏好、疾病限制、日常节奏、训练频率和备注。
+- 需要先从订单截图或订单文字里识别已购食材，再考虑目标、口味偏好、疾病限制、日常节奏、训练频率和备注。
 - 对疾病相关情况给出保守提醒，不要冒充医生，不要提供诊断或药物建议。
 - 不再参考山姆、会员店或商品目录，不要输出采购清单。
 - 菜谱应该尽量优先利用截图中已经买到的食材；如果必须补充，只能是少量基础调味料或常见辅料。
@@ -28,8 +28,12 @@ const dietAgentInstructions = `
 `.trim();
 
 function buildDietPrompt(profile: OrderRecipeRequest) {
+  const orderSource = profile.orderImageDataUrl
+    ? "订单截图"
+    : "订单文字";
+
   return `
-请识别这张买菜 app 订单截图中用户已经购买的食材，并基于这些食材生成个性化菜谱建议，严格返回 JSON 对象。
+请根据用户提供的${orderSource}识别已经购买的食材，并基于这些食材生成个性化菜谱建议，严格返回 JSON 对象。
 
 用户画像：
 ${JSON.stringify(
@@ -46,6 +50,9 @@ ${JSON.stringify(
     null,
     2
   )}
+
+订单文字：
+${profile.orderText?.trim() || "未提供订单文字；如果有截图，请从图片中识别。"}
 
 JSON 必须符合下面的结构要求：
 {
@@ -75,7 +82,7 @@ JSON 必须符合下面的结构要求：
 }
 
 补充要求：
-- recognizedItems 至少识别 5 个食材；如果截图里确实不够清晰，也要把可识别部分列出来并说明不确定性。
+- recognizedItems 至少识别 5 个食材；如果输入里确实不够清晰，也要把可识别部分列出来并说明不确定性。
 - recipeSuggestions 给出 3 到 5 道菜。
 - 每道菜尽量复用 recognizedItems 里的食材，不要为了凑数发明太多额外原料。
 - 菜谱风格优先家常、好执行、符合用户目标。
@@ -161,20 +168,25 @@ async function generateVisionResult(profile: OrderRecipeRequest) {
       type: "text",
       text: buildDietPrompt(profile)
     },
-    {
+  ];
+
+  if (profile.orderImageDataUrl) {
+    messageContent.push({
       type: "image_url",
       imageUrl: {
         url: profile.orderImageDataUrl,
         detail: "high"
       }
-    }
-  ];
+    });
+  }
 
   const response = await client.chat.send({
     httpReferer: process.env.OPENROUTER_APP_URL,
     appTitle: process.env.OPENROUTER_APP_NAME || "Diet Agent Shanghai",
     chatGenerationParams: {
-      model: process.env.OPENROUTER_VISION_MODEL || process.env.OPENROUTER_MODEL || "openrouter/auto",
+      model: profile.orderImageDataUrl
+        ? process.env.OPENROUTER_VISION_MODEL || process.env.OPENROUTER_MODEL || "openrouter/auto"
+        : process.env.OPENROUTER_MODEL || "openrouter/auto",
       messages: [
         {
           role: "user",

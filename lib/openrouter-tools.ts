@@ -21,7 +21,14 @@ export const profileContextTool = tool({
       "fat-loss": "以减脂和饱腹感控制为主",
       "muscle-gain": "以增肌和蛋白质充足为主",
       maintain: "以均衡稳定为主",
-      "blood-sugar": "以控糖和稳定血糖波动为主"
+      "blood-sugar": "以控糖和稳定血糖波动为主",
+      "high-protein": "以提高蛋白质摄入和增强饱腹感为主",
+      "low-protein": "以控制蛋白质负担、选择适量优质蛋白为主",
+      "low-fat": "以减少油脂和高脂食材摄入为主",
+      "low-sodium": "以低盐、少加工调味和清淡烹饪为主",
+      "low-carb": "以减少精制碳水、提高蔬菜和蛋白比例为主",
+      "high-fiber": "以提高膳食纤维、蔬菜豆类和粗粮占比为主",
+      "digestive-friendly": "以温和、易消化、少刺激的烹饪方式为主"
     };
 
     const scheduleMap: Record<PlannerProfile["schedule"], string> = {

@@ -47,9 +47,35 @@ function toggleItem<T extends string>(items: T[], target: T) {
 export function PlannerApp() {
   const [profile, setProfile] = useState<PlannerProfile>(initialProfile);
   const [orderImageDataUrl, setOrderImageDataUrl] = useState("");
+  const [orderText, setOrderText] = useState("");
   const [result, setResult] = useState<DietPlanResult | null>(null);
+  const [copiedRecipe, setCopiedRecipe] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  async function copyRecipe(recipe: DietPlanResult["recipeSuggestions"][number]) {
+    const text = [
+      recipe.title,
+      "",
+      recipe.summary,
+      "",
+      `适配原因：${recipe.fitReason}`,
+      "",
+      "用到的食材：",
+      ...recipe.ingredientsToUse.map((ingredient) => `- ${ingredient}`),
+      "",
+      "步骤：",
+      ...recipe.steps.map((step, index) => `${index + 1}. ${step}`)
+    ].join("\n");
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedRecipe(recipe.title);
+      window.setTimeout(() => setCopiedRecipe(null), 1800);
+    } catch {
+      setError("复制失败，请检查浏览器剪贴板权限。");
+    }
+  }
 
   async function handleFileChange(file: File | null) {
     if (!file) {
@@ -73,13 +99,14 @@ export function PlannerApp() {
     setError(null);
 
     try {
-      if (!orderImageDataUrl) {
-        throw new Error("请先上传买菜 app 订单截图。");
+      if (!orderImageDataUrl && !orderText.trim()) {
+        throw new Error("请上传买菜 app 订单截图，或直接粘贴订单文字。");
       }
 
       const payloadBody: OrderRecipeRequest = {
         ...profile,
-        orderImageDataUrl
+        orderImageDataUrl,
+        orderText
       };
 
       const response = await fetch("/api/recommend", {
@@ -113,15 +140,15 @@ export function PlannerApp() {
       <section className="hero">
         <div className="hero-copy">
           <p className="eyebrow">Diet Agent Shanghai</p>
-          <h1>上传买菜订单截图，让 agent 识别你已经买了什么，再推荐能马上开做的菜谱。</h1>
+          <h1>上传买菜订单截图，或粘贴订单文字，让 agent 识别你买了什么再推荐菜谱。</h1>
           <p className="hero-text">
-            它会先识别订单截图中的食材，再结合你的目标、口味和健康限制，给出更贴合这批食材的家常做法。
+            它会先识别订单里的食材，再结合你的目标、口味和健康限制，给出更贴合这批食材的家常做法。
           </p>
         </div>
         <div className="hero-meta">
           <div>
             <span>输入</span>
-            <strong>订单截图 / 目标 / 偏好 / 疾病 / 训练频率</strong>
+            <strong>订单截图或文字 / 目标 / 偏好 / 疾病 / 训练频率</strong>
           </div>
           <div>
             <span>输出</span>
@@ -138,7 +165,7 @@ export function PlannerApp() {
           </div>
 
           <label>
-            订单截图
+            订单截图（可选）
             <input
               type="file"
               accept="image/*"
@@ -154,6 +181,16 @@ export function PlannerApp() {
               <img src={orderImageDataUrl} alt="订单截图预览" />
             </div>
           ) : null}
+
+          <label>
+            订单文字（可选）
+            <textarea
+              rows={5}
+              value={orderText}
+              onChange={(event) => setOrderText(event.target.value)}
+              placeholder="可以直接粘贴订单商品名，例如：鸡胸肉 1kg、番茄、鸡蛋、菠菜、土豆、虾仁..."
+            />
+          </label>
 
           <label>
             称呼
@@ -209,6 +246,13 @@ export function PlannerApp() {
                 <option value="muscle-gain">增肌</option>
                 <option value="maintain">维持体重</option>
                 <option value="blood-sugar">控糖饮食</option>
+                <option value="high-protein">高蛋白</option>
+                <option value="low-protein">低蛋白</option>
+                <option value="low-fat">低脂</option>
+                <option value="low-sodium">低盐</option>
+                <option value="low-carb">低碳水</option>
+                <option value="high-fiber">高纤维</option>
+                <option value="digestive-friendly">肠胃友好</option>
               </select>
             </label>
 
@@ -285,7 +329,7 @@ export function PlannerApp() {
           </label>
 
           <button className="submit-button" type="submit" disabled={loading}>
-            {loading ? "生成中..." : "让 Agent 生成饮食计划"}
+            {loading ? "生成中..." : "让 Agent 推荐菜谱"}
           </button>
 
           {error ? <p className="error-text">{error}</p> : null}
@@ -333,7 +377,16 @@ export function PlannerApp() {
                   <h3>推荐菜谱</h3>
                   {result.recipeSuggestions.map((recipe) => (
                     <article className="list-item" key={recipe.title}>
-                      <h4>{recipe.title}</h4>
+                      <div className="recipe-title-row">
+                        <h4>{recipe.title}</h4>
+                        <button
+                          type="button"
+                          className="copy-button"
+                          onClick={() => void copyRecipe(recipe)}
+                        >
+                          {copiedRecipe === recipe.title ? "已复制" : "复制菜谱"}
+                        </button>
+                      </div>
                       <p>{recipe.summary}</p>
                       <small>{recipe.fitReason}</small>
                       <ul>
@@ -376,7 +429,7 @@ export function PlannerApp() {
               <p className="section-kicker">Waiting</p>
               <h2>结果还没生成</h2>
               <p>
-                上传订单截图并填写左侧信息后，服务端 agent 会先识别你买了哪些菜，再根据你的目标和限制动态推荐菜谱。
+                上传订单截图或粘贴订单文字后，服务端 agent 会先识别你买了哪些菜，再根据你的目标和限制动态推荐菜谱。
               </p>
             </div>
           )}

@@ -20,7 +20,14 @@ export const goalValues = [
   "fat-loss",
   "muscle-gain",
   "maintain",
-  "blood-sugar"
+  "blood-sugar",
+  "high-protein",
+  "low-protein",
+  "low-fat",
+  "low-sodium",
+  "low-carb",
+  "high-fiber",
+  "digestive-friendly"
 ] as const;
 
 export const scheduleValues = ["busy", "balanced", "serious"] as const;
@@ -42,7 +49,8 @@ export type PlannerProfile = {
 };
 
 export type OrderRecipeRequest = PlannerProfile & {
-  orderImageDataUrl: string;
+  orderImageDataUrl?: string;
+  orderText?: string;
 };
 
 export const plannerProfileSchema = z.object({
@@ -57,8 +65,15 @@ export const plannerProfileSchema = z.object({
 });
 
 export const orderRecipeRequestSchema = plannerProfileSchema.extend({
-  orderImageDataUrl: z.string().min(1)
-});
+  orderImageDataUrl: z.string().optional(),
+  orderText: z.string().optional()
+}).refine(
+  (value) =>
+    Boolean(value.orderImageDataUrl?.trim()) || Boolean(value.orderText?.trim()),
+  {
+    message: "请上传订单截图，或粘贴买菜订单文字。"
+  }
+);
 
 export const dietPlanResultSchema = z.object({
   planTitle: z.string(),
