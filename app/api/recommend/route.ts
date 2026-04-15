@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import { runDietPlannerAgent } from "@/lib/diet-agent";
-import type { PlannerProfile } from "@/lib/schema";
+import type { OrderRecipeRequest } from "@/lib/schema";
 
 export async function POST(request: Request) {
   try {
-    const profile = (await request.json()) as PlannerProfile;
+    const profile = (await request.json()) as OrderRecipeRequest;
 
     if (!process.env.OPENROUTER_API_KEY) {
       return NextResponse.json(

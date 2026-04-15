@@ -42,40 +42,49 @@ export const profileContextTool = tool({
   }
 });
 
-export const samsContextTool = tool({
-  name: "build_sams_context",
+export const recipeContextTool = tool({
+  name: "build_recipe_context",
   description:
-    "Return planning constraints for building a Shanghai Sam's Club shopping list focused on bulk packs, freezer-friendly staples, and practical weekly execution.",
+    "Return practical recipe-planning constraints based on the user's daily rhythm and the fact that recipes should preferentially use ingredients already purchased in the grocery app order.",
   inputSchema: z.object({
     schedule: z.enum(["busy", "balanced", "serious"]),
-    householdHint: z.string().optional()
+    trainingFrequency: z.string().optional(),
+    notes: z.string().optional()
   }),
   outputSchema: z.object({
-    city: z.string(),
-    storeType: z.string(),
-    shoppingPrinciples: z.array(z.string()),
+    cookingStyle: z.string(),
+    planningPrinciples: z.array(z.string()),
     schedulePreference: z.string(),
-    householdHint: z.string()
+    trainingHint: z.string(),
+    notesHint: z.string()
   }),
-  execute: async ({ schedule, householdHint }) => {
+  execute: async ({ schedule, trainingFrequency, notes }) => {
     return {
-      city: "上海",
-      storeType: "山姆会员店",
-      shoppingPrinciples: [
-        "优先适合一周内消耗或可冷冻分装的大包装食材",
-        "避免给单人用户推荐明显难以消耗的大量易坏品",
-        "优先高复购率、适合工作日执行的基础食材",
-        "购物清单需要说明每类食材的用途，而不是只列名字"
+      cookingStyle:
+        schedule === "busy"
+          ? "优先一锅菜、快炒、蒸煮、空气炸锅和 20 分钟内完成的菜谱"
+          : schedule === "serious"
+            ? "可以接受稍复杂、需要提前腌制或备料的菜谱"
+            : "以家常、稳定、容易复现的菜谱为主",
+      planningPrinciples: [
+        "优先使用截图里已经买到的食材",
+        "允许补充少量基础调味料，但不要依赖大量额外采购",
+        "菜谱要尽量可执行、像真实家常菜",
+        "如果截图里食材识别不完整，要在结果中明确说明假设"
       ],
       schedulePreference:
         schedule === "busy"
-          ? "推荐低处理成本、可直接组合的食材"
+          ? "推荐低处理成本和剩菜也容易继续利用的做法"
           : schedule === "serious"
-            ? "可以推荐需要提前备餐但更高质量的食材"
-            : "推荐家常稳定、易执行的折中方案",
-      householdHint: householdHint || "默认按 1 到 2 人的日常采购思路规划"
+            ? "可以结合训练或一周备餐安排更完整的菜谱组合"
+            : "推荐家常稳定、适合工作日反复执行的折中方案",
+      trainingHint: trainingFrequency || "未明确训练频率",
+      notesHint: notes || "没有额外备注"
     };
   }
 });
 
-export const defaultDietTools = [profileContextTool, samsContextTool] as const;
+export const defaultDietTools = [
+  profileContextTool,
+  recipeContextTool
+] as const;

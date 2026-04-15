@@ -41,6 +41,10 @@ export type PlannerProfile = {
   notes: string;
 };
 
+export type OrderRecipeRequest = PlannerProfile & {
+  orderImageDataUrl: string;
+};
+
 export const plannerProfileSchema = z.object({
   name: z.string(),
   age: z.string(),
@@ -52,29 +56,30 @@ export const plannerProfileSchema = z.object({
   notes: z.string()
 });
 
+export const orderRecipeRequestSchema = plannerProfileSchema.extend({
+  orderImageDataUrl: z.string().min(1)
+});
+
 export const dietPlanResultSchema = z.object({
   planTitle: z.string(),
-  planMode: z.string(),
   positioning: z.string(),
   goalSummary: z.string(),
   nutritionFocus: z.string(),
   executionStyle: z.string(),
-  meals: z.array(
+  recognizedItems: z.array(
     z.object({
       name: z.string(),
-      strategy: z.string(),
-      example: z.string()
+      evidence: z.string(),
+      confidence: z.string()
     })
   ),
-  shoppingCategories: z.array(
+  recipeSuggestions: z.array(
     z.object({
-      category: z.string(),
-      items: z.array(
-        z.object({
-          name: z.string(),
-          reason: z.string()
-        })
-      )
+      title: z.string(),
+      summary: z.string(),
+      fitReason: z.string(),
+      ingredientsToUse: z.array(z.string()),
+      steps: z.array(z.string())
     })
   ),
   executionTips: z.array(z.string()),

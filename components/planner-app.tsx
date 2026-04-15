@@ -3,6 +3,7 @@
 import { FormEvent, useState } from "react";
 import type {
   DietPlanResult,
+  OrderRecipeRequest,
   PlannerProfile,
   PreferenceValue,
   ConditionValue,
@@ -45,9 +46,26 @@ function toggleItem<T extends string>(items: T[], target: T) {
 
 export function PlannerApp() {
   const [profile, setProfile] = useState<PlannerProfile>(initialProfile);
+  const [orderImageDataUrl, setOrderImageDataUrl] = useState("");
   const [result, setResult] = useState<DietPlanResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  async function handleFileChange(file: File | null) {
+    if (!file) {
+      setOrderImageDataUrl("");
+      return;
+    }
+
+    const reader = new FileReader();
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error("截图读取失败"));
+      reader.readAsDataURL(file);
+    });
+
+    setOrderImageDataUrl(dataUrl);
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -55,12 +73,21 @@ export function PlannerApp() {
     setError(null);
 
     try {
+      if (!orderImageDataUrl) {
+        throw new Error("请先上传买菜 app 订单截图。");
+      }
+
+      const payloadBody: OrderRecipeRequest = {
+        ...profile,
+        orderImageDataUrl
+      };
+
       const response = await fetch("/api/recommend", {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify(profile)
+        body: JSON.stringify(payloadBody)
       });
 
       const payload = (await response.json()) as DietPlanResult | { error: string };
@@ -86,19 +113,19 @@ export function PlannerApp() {
       <section className="hero">
         <div className="hero-copy">
           <p className="eyebrow">Diet Agent Shanghai</p>
-          <h1>把你的目标、口味与健康限制，交给一个会规划饮食的 agent。</h1>
+          <h1>上传买菜订单截图，让 agent 识别你已经买了什么，再推荐能马上开做的菜谱。</h1>
           <p className="hero-text">
-            这不是写死模板，而是由模型根据用户画像动态生成饮食策略、三餐方向、执行提醒与上海山姆采购清单。
+            它会先识别订单截图中的食材，再结合你的目标、口味和健康限制，给出更贴合这批食材的家常做法。
           </p>
         </div>
         <div className="hero-meta">
           <div>
             <span>输入</span>
-            <strong>目标 / 偏好 / 疾病 / 训练频率</strong>
+            <strong>订单截图 / 目标 / 偏好 / 疾病 / 训练频率</strong>
           </div>
           <div>
             <span>输出</span>
-            <strong>结构化饮食计划 + 山姆采购建议</strong>
+            <strong>识别到的食材 + 个性化菜谱建议</strong>
           </div>
         </div>
       </section>
@@ -109,6 +136,24 @@ export function PlannerApp() {
             <p className="section-kicker">Profile</p>
             <h2>建立用户画像</h2>
           </div>
+
+          <label>
+            订单截图
+            <input
+              type="file"
+              accept="image/*"
+              onChange={(event) => {
+                const file = event.target.files?.[0] ?? null;
+                void handleFileChange(file);
+              }}
+            />
+          </label>
+
+          {orderImageDataUrl ? (
+            <div className="upload-preview">
+              <img src={orderImageDataUrl} alt="订单截图预览" />
+            </div>
+          ) : null}
 
           <label>
             称呼
@@ -255,7 +300,6 @@ export function PlannerApp() {
                   <h2>{result.planTitle}</h2>
                   <p>{result.positioning}</p>
                 </div>
-                <div className="badge">{result.planMode}</div>
               </div>
 
               <div className="triple-grid">
@@ -275,27 +319,31 @@ export function PlannerApp() {
 
               <div className="two-grid">
                 <section className="surface-block">
-                  <h3>三餐与加餐建议</h3>
-                  {result.meals.map((meal) => (
-                    <article className="list-item" key={meal.name}>
-                      <h4>{meal.name}</h4>
-                      <p>{meal.strategy}</p>
-                      <small>{meal.example}</small>
+                  <h3>识别到的食材</h3>
+                  {result.recognizedItems.map((item) => (
+                    <article className="list-item" key={item.name}>
+                      <h4>{item.name}</h4>
+                      <p>{item.evidence}</p>
+                      <small>识别置信度：{item.confidence}</small>
                     </article>
                   ))}
                 </section>
 
                 <section className="surface-block">
-                  <h3>上海山姆购物清单</h3>
-                  {result.shoppingCategories.map((category) => (
-                    <article className="list-item" key={category.category}>
-                      <h4>{category.category}</h4>
+                  <h3>推荐菜谱</h3>
+                  {result.recipeSuggestions.map((recipe) => (
+                    <article className="list-item" key={recipe.title}>
+                      <h4>{recipe.title}</h4>
+                      <p>{recipe.summary}</p>
+                      <small>{recipe.fitReason}</small>
                       <ul>
-                        {category.items.map((item) => (
-                          <li key={`${category.category}-${item.name}`}>
-                            <strong>{item.name}</strong>
-                            <span>{item.reason}</span>
-                          </li>
+                        {recipe.ingredientsToUse.map((ingredient) => (
+                          <li key={`${recipe.title}-${ingredient}`}>{ingredient}</li>
+                        ))}
+                      </ul>
+                      <ul>
+                        {recipe.steps.map((step) => (
+                          <li key={`${recipe.title}-${step}`}>{step}</li>
                         ))}
                       </ul>
                     </article>
@@ -328,7 +376,7 @@ export function PlannerApp() {
               <p className="section-kicker">Waiting</p>
               <h2>结果还没生成</h2>
               <p>
-                填完左侧表单后，服务端 agent 会根据你的目标和限制动态组织推荐内容，而不是返回一份写死的模板。
+                上传订单截图并填写左侧信息后，服务端 agent 会先识别你买了哪些菜，再根据你的目标和限制动态推荐菜谱。
               </p>
             </div>
           )}
