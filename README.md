@@ -22,6 +22,7 @@
 2. 指向本仓库根目录的 `docker-compose.yml`
 3. 在 Dokploy 环境变量中配置 `OPENROUTER_API_KEY`
 4. 如果使用自定义域名，把 `OPENROUTER_APP_URL` 设置为你的线上访问地址
+5. 如果宿主机端口冲突，可以把 `APP_PORT` 改成其他空闲端口，例如 `13001`
 
 本地也可以直接运行：
 
