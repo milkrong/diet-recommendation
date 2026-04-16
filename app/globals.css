@@ -47,6 +47,13 @@ body::before {
   padding: 28px 0 64px;
 }
 
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
 .hero {
   display: grid;
   grid-template-columns: 1.55fr 0.95fr;
@@ -381,6 +388,29 @@ fieldset {
   max-width: 460px;
 }
 
+.auth-shell {
+  width: min(1160px, calc(100% - 32px));
+  min-height: 100vh;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 24px;
+  align-items: center;
+}
+
+.auth-copy h1 {
+  margin: 0;
+  max-width: 10ch;
+  font-family: "STSong", "Songti SC", serif;
+  font-size: clamp(2.7rem, 6vw, 5rem);
+  line-height: 1.04;
+}
+
+.auth-card {
+  display: flex;
+  justify-content: center;
+}
+
 .progress-state {
   display: grid;
   align-content: center;
@@ -449,7 +479,8 @@ fieldset {
   .workspace,
   .field-grid,
   .triple-grid,
-  .two-grid {
+  .two-grid,
+  .auth-shell {
     grid-template-columns: 1fr;
   }
 

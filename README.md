@@ -4,6 +4,7 @@
 
 ## 功能
 
+- 支持 Clerk 登录 / 注册
 - 上传买菜 app 订单截图，或直接粘贴订单文字，并识别已购食材
 - 根据用户目标、偏好、疾病和日常节奏动态推荐菜谱
 - 输出识别到的食材、菜谱建议、执行提示和风险提醒
@@ -15,7 +16,7 @@
 
 1. 安装依赖
 2. 复制 `.env.example` 为 `.env.local`
-3. 配置 `OPENROUTER_API_KEY`
+3. 配置 Clerk 和 OpenRouter 环境变量
 4. 运行 `npm run dev`
 
 ## Dokploy / Docker Compose 部署
@@ -38,3 +39,4 @@ docker compose up -d --build
 - 模型默认使用 `OPENROUTER_MODEL=openrouter/auto`
 - 如果你想切换模型，可以在 `.env.local` 中覆盖 `OPENROUTER_MODEL`
 - 如果你想单独给截图识别指定模型，可以在 `.env.local` 里设置 `OPENROUTER_VISION_MODEL`
+- Clerk 至少需要配置 `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` 和 `CLERK_SECRET_KEY`

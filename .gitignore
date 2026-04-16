@@ -32,3 +32,6 @@ pnpm-debug.log*
 
 # deployment
 .vercel
+
+# clerk configuration (can include secrets)
+/.clerk/

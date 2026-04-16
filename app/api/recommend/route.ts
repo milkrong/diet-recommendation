@@ -1,9 +1,16 @@
+import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import { runDietPlannerAgent } from "@/lib/diet-agent";
 import type { OrderRecipeRequest } from "@/lib/schema";
 
 export async function POST(request: Request) {
   try {
+    const { userId } = await auth();
+
+    if (!userId) {
+      return NextResponse.json({ error: "请先登录。" }, { status: 401 });
+    }
+
     const profile = (await request.json()) as OrderRecipeRequest;
 
     if (!process.env.OPENROUTER_API_KEY) {

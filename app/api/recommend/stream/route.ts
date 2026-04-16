@@ -1,3 +1,4 @@
+import { auth } from "@clerk/nextjs/server";
 import { runDietPlannerAgent } from "@/lib/diet-agent";
 import type { OrderRecipeRequest } from "@/lib/schema";
 
@@ -7,6 +8,23 @@ function formatSse(event: string, data: unknown) {
 
 export async function POST(request: Request) {
   const encoder = new TextEncoder();
+  const { userId } = await auth();
+
+  if (!userId) {
+    return new Response(
+      formatSse("error", {
+        message: "请先登录。"
+      }),
+      {
+        status: 401,
+        headers: {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive"
+        }
+      }
+    );
+  }
 
   if (!process.env.OPENROUTER_API_KEY) {
     return new Response(

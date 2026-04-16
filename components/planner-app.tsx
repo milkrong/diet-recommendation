@@ -1,5 +1,6 @@
 "use client";
 
+import { UserButton } from "@clerk/nextjs";
 import { FormEvent, useEffect, useState } from "react";
 import type {
   DietPlanResult,
@@ -101,6 +102,7 @@ function toggleRequiredItem<T extends string>(items: T[], target: T) {
 }
 
 export function PlannerApp() {
+  const hasClerk = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
   const [mounted, setMounted] = useState(false);
   const [profile, setProfile] = useState<PlannerProfile>(initialProfile);
   const [orderImageDataUrl, setOrderImageDataUrl] = useState("");
@@ -297,6 +299,12 @@ export function PlannerApp() {
 
   return (
     <main className="shell">
+      <div className="topbar">
+        <div>
+          <p className="eyebrow">Signed In</p>
+        </div>
+        {hasClerk ? <UserButton afterSignOutUrl="/sign-in" /> : null}
+      </div>
       <section className="hero">
         <div className="hero-copy">
           <p className="eyebrow">Diet Agent Shanghai</p>

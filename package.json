@@ -8,6 +8,7 @@
     "start": "next start"
   },
   "dependencies": {
+    "@clerk/nextjs": "^6.17.1",
     "@openrouter/sdk": "latest",
     "eventemitter3": "^5.0.1",
     "next": "latest",
