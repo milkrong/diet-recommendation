@@ -13,9 +13,8 @@ import {
   startActiveObservation,
   startObservation
 } from "@langfuse/tracing";
-import { createAgent } from "@/lib/openrouter-agent";
 import { extractJsonObject } from "@/lib/openrouter-json";
-import { defaultDietTools } from "@/lib/openrouter-tools";
+import { buildProfileContext, buildRecipeContext } from "@/lib/openrouter-tools";
 import { OpenRouter } from "@openrouter/sdk";
 import { z } from "zod/v4";
 
@@ -89,7 +88,6 @@ const dietAgentInstructions = `
 
 你的要求：
 - 推荐内容必须根据用户输入动态生成，不能复读固定模板。
-- 在形成最终结果前，先调用 build_profile_context 和 build_recipe_context 两个工具补全上下文。
 - 需要先从订单截图或订单文字里识别已购食材，再考虑目标、口味偏好、疾病限制、日常节奏、训练频率和备注。
 - 对疾病相关情况给出保守提醒，不要冒充医生，不要提供诊断或药物建议。
 - 不再参考山姆、会员店或商品目录，不要输出采购清单。
@@ -97,18 +95,6 @@ const dietAgentInstructions = `
 - 如果信息不足，可以做合理假设，但必须在 cautions 中明确说出假设。
 - 只输出 JSON，不要输出 markdown，不要加解释性前言或结尾。
 `.trim();
-
-function createDietAgent() {
-  return createAgent({
-    apiKey: process.env.OPENROUTER_API_KEY!,
-    model: process.env.OPENROUTER_MODEL || "openrouter/auto",
-    instructions: dietAgentInstructions,
-    tools: [...defaultDietTools],
-    maxSteps: 5,
-    appUrl: process.env.OPENROUTER_APP_URL,
-    appName: process.env.OPENROUTER_APP_NAME || "Diet Agent Shanghai"
-  });
-}
 
 function createOpenRouterClient() {
   return new OpenRouter({
@@ -170,11 +156,24 @@ JSON 结构：
 }
 
 function buildRecipePrompt(profile: OrderRecipeRequest, recognizedItems: RecognizedItem[]) {
+  const profileContext = buildProfileContext(profile);
+  const recipeContext = buildRecipeContext({
+    schedule: profile.schedule,
+    trainingFrequency: profile.trainingFrequency,
+    notes: profile.notes
+  });
+
   return `
 请基于已经识别出的买菜订单食材，为用户生成个性化菜谱建议，并严格返回 JSON 对象。
 
 用户画像：
 ${buildProfileText(profile)}
+
+归纳后的用户上下文：
+${JSON.stringify(profileContext, null, 2)}
+
+归纳后的做饭约束：
+${JSON.stringify(recipeContext, null, 2)}
 
 已识别食材：
 ${JSON.stringify(recognizedItems, null, 2)}
@@ -262,11 +261,22 @@ function parseJsonWithSchema<T>(rawText: string, schema: z.ZodType<T>) {
   return schema.parse(parsed);
 }
 
-async function generateChatText(profile: OrderRecipeRequest, prompt: string) {
+async function generateChatText(
+  profile: OrderRecipeRequest,
+  prompt: string,
+  options?: {
+    model?: string;
+    observationName?: string;
+    stage?: "recognition" | "recipe" | "repair";
+    includeImage?: boolean;
+  }
+) {
   const client = createOpenRouterClient();
-  const model = profile.orderImageDataUrl
-    ? process.env.OPENROUTER_VISION_MODEL || process.env.OPENROUTER_MODEL || "openrouter/auto"
-    : process.env.OPENROUTER_MODEL || "openrouter/auto";
+  const model =
+    options?.model ||
+    (options?.includeImage !== false && profile.orderImageDataUrl
+      ? process.env.OPENROUTER_VISION_MODEL || process.env.OPENROUTER_MODEL || "openrouter/auto"
+      : process.env.OPENROUTER_MODEL || "openrouter/auto");
   const messageContent: OpenRouterChatContentPart[] = [
     {
       type: "text",
@@ -274,7 +284,7 @@ async function generateChatText(profile: OrderRecipeRequest, prompt: string) {
     }
   ];
 
-  if (profile.orderImageDataUrl) {
+  if (options?.includeImage !== false && profile.orderImageDataUrl) {
     messageContent.push({
       type: "image_url",
       imageUrl: {
@@ -285,17 +295,17 @@ async function generateChatText(profile: OrderRecipeRequest, prompt: string) {
   }
 
   const generation = startObservation(
-    "order-ingredient-recognition",
+    options?.observationName || "openrouter-structured-generation",
     {
       model,
       input: {
         prompt,
-        hasOrderImage: Boolean(profile.orderImageDataUrl),
+        hasOrderImage: Boolean(options?.includeImage !== false && profile.orderImageDataUrl),
         orderTextPreview: profile.orderText?.slice(0, 300) || undefined
       },
       metadata: {
         feature: "diet-recommendation",
-        stage: "recognition"
+        stage: options?.stage || "recognition"
       }
     },
     { asType: "generation" }
@@ -365,8 +375,26 @@ async function repairJson<T>(
   );
 
   try {
-    const repairAgent = createDietAgent();
-    const repairedText = await repairAgent.sendSync(buildRepairPrompt(rawText, error));
+    const repairedText = await generateChatText(
+      {
+        name: "",
+        age: "",
+        goals: ["maintain"],
+        schedule: "balanced",
+        preferences: [],
+        conditions: [],
+        trainingFrequency: "",
+        notes: "",
+        orderText: "",
+        orderImageDataUrl: ""
+      },
+      buildRepairPrompt(rawText, error),
+      {
+        observationName: "repair-invalid-json-model-call",
+        stage: "repair",
+        includeImage: false
+      }
+    );
     const repaired = parseJsonWithSchema(repairedText, schema);
 
     repairObservation.update({
@@ -443,8 +471,11 @@ async function generateRecipes(
   let rawText = "";
 
   try {
-    const agent = createDietAgent();
-    rawText = await agent.sendSync(buildRecipePrompt(profile, recognizedItems));
+    rawText = await generateChatText(profile, buildRecipePrompt(profile, recognizedItems), {
+      observationName: "generate-recipe-plan-model-call",
+      stage: "recipe",
+      includeImage: false
+    });
   } catch (error) {
     recipeGeneration.update({
       level: "ERROR",
