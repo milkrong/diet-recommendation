@@ -41,6 +41,106 @@ type DietAgentOptions = {
   onProgress?: (event: DietAgentProgressEvent) => void;
 };
 
+const recognizedItemsJsonSchema = {
+  name: "recognized_items_result",
+  strict: true,
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["recognizedItems"],
+    properties: {
+      recognizedItems: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["name", "evidence", "confidence"],
+          properties: {
+            name: { type: "string" },
+            evidence: { type: "string" },
+            confidence: { type: "string" }
+          }
+        }
+      }
+    }
+  }
+} as const;
+
+const dietPlanJsonSchema = {
+  name: "diet_plan_result",
+  strict: true,
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "planTitle",
+      "positioning",
+      "goalSummary",
+      "nutritionFocus",
+      "executionStyle",
+      "recognizedItems",
+      "recipeSuggestions",
+      "executionTips",
+      "cautions"
+    ],
+    properties: {
+      planTitle: { type: "string" },
+      positioning: { type: "string" },
+      goalSummary: { type: "string" },
+      nutritionFocus: { type: "string" },
+      executionStyle: { type: "string" },
+      recognizedItems: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["name", "evidence", "confidence"],
+          properties: {
+            name: { type: "string" },
+            evidence: { type: "string" },
+            confidence: { type: "string" }
+          }
+        }
+      },
+      recipeSuggestions: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "title",
+            "summary",
+            "fitReason",
+            "ingredientsToUse",
+            "steps"
+          ],
+          properties: {
+            title: { type: "string" },
+            summary: { type: "string" },
+            fitReason: { type: "string" },
+            ingredientsToUse: {
+              type: "array",
+              items: { type: "string" }
+            },
+            steps: {
+              type: "array",
+              items: { type: "string" }
+            }
+          }
+        }
+      },
+      executionTips: {
+        type: "array",
+        items: { type: "string" }
+      },
+      cautions: {
+        type: "array",
+        items: { type: "string" }
+      }
+    }
+  }
+} as const;
+
 function serializeProfileForTelemetry(profile: OrderRecipeRequest) {
   return {
     name: profile.name || undefined,
@@ -234,6 +334,16 @@ ${rawText}
 }
 
 function extractAssistantText(response: unknown) {
+  const outputText = (response as { outputText?: unknown })?.outputText;
+
+  if (typeof outputText === "string") {
+    return outputText;
+  }
+
+  if (outputText && typeof outputText === "object") {
+    return JSON.stringify(outputText);
+  }
+
   const content =
     (response as { choices?: Array<{ message?: { content?: unknown } }> })?.choices?.[0]
       ?.message?.content;
@@ -250,6 +360,15 @@ function extractAssistantText(response: unknown) {
           : ""
       )
       .join("");
+  }
+
+  if (content && typeof content === "object") {
+    return JSON.stringify(content);
+  }
+
+  const output = (response as { output?: unknown })?.output;
+  if (output && typeof output === "object") {
+    return JSON.stringify(output);
   }
 
   throw new Error("模型没有返回可解析的文本内容。");
@@ -269,6 +388,11 @@ async function generateChatText(
     observationName?: string;
     stage?: "recognition" | "recipe" | "repair";
     includeImage?: boolean;
+    responseSchema?: {
+      name: string;
+      strict: boolean;
+      schema: Record<string, unknown>;
+    };
   }
 ) {
   const client = createOpenRouterClient();
@@ -323,9 +447,20 @@ async function generateChatText(
             content: messageContent
           }
         ],
-        responseFormat: {
-          type: "json_object"
-        }
+        responseFormat: options?.responseSchema
+          ? {
+              type: "json_schema",
+              jsonSchema: options.responseSchema
+            }
+          : {
+              type: "json_object"
+            },
+        plugins: [
+          {
+            id: "response-healing",
+            enabled: true
+          }
+        ]
       }
     });
 
@@ -392,7 +527,14 @@ async function repairJson<T>(
       {
         observationName: "repair-invalid-json-model-call",
         stage: "repair",
-        includeImage: false
+        includeImage: false,
+        responseSchema: {
+          name: "json_repair_result",
+          strict: true,
+          schema: {
+            type: "object"
+          }
+        }
       }
     );
     const repaired = parseJsonWithSchema(repairedText, schema);
@@ -428,7 +570,12 @@ async function recognizeItems(profile: OrderRecipeRequest, options?: DietAgentOp
       : "正在解析订单文字中的食材。"
   });
 
-  const rawText = await generateChatText(profile, buildRecognitionPrompt(profile));
+  const rawText = await generateChatText(profile, buildRecognitionPrompt(profile), {
+    observationName: "order-ingredient-recognition-model-call",
+    stage: "recognition",
+    includeImage: true,
+    responseSchema: recognizedItemsJsonSchema
+  });
 
   try {
     return parseJsonWithSchema(rawText, recognizedItemsResultSchema).recognizedItems;
@@ -474,7 +621,8 @@ async function generateRecipes(
     rawText = await generateChatText(profile, buildRecipePrompt(profile, recognizedItems), {
       observationName: "generate-recipe-plan-model-call",
       stage: "recipe",
-      includeImage: false
+      includeImage: false,
+      responseSchema: dietPlanJsonSchema
     });
   } catch (error) {
     recipeGeneration.update({
