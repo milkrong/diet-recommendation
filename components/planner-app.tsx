@@ -2,7 +2,7 @@
 
 import { UserButton } from "@clerk/nextjs";
 import * as Sentry from "@sentry/nextjs";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import type {
   DietPlanResult,
   OrderRecipeRequest,
@@ -12,6 +12,7 @@ import type {
   GoalValue,
   ScheduleValue
 } from "@/lib/schema";
+import { plannerProfileSchema } from "@/lib/schema";
 
 function captureClientException(
   error: unknown,
@@ -125,7 +126,7 @@ function toggleRequiredItem<T extends string>(items: T[], target: T) {
   return [...items, target];
 }
 
-export function PlannerApp() {
+export function PlannerApp({ userId }: { userId?: string | null }) {
   const hasClerk = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
   const [mounted, setMounted] = useState(false);
   const [profile, setProfile] = useState<PlannerProfile>(initialProfile);
@@ -137,10 +138,113 @@ export function PlannerApp() {
   const [progressStep, setProgressStep] = useState(0);
   const [progressMessage, setProgressMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [profileHydrated, setProfileHydrated] = useState(false);
+  const [savedProfileMessage, setSavedProfileMessage] = useState<string | null>(null);
+  const saveTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  useEffect(() => {
+    if (!mounted) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        const response = await fetch("/api/profile", {
+          method: "GET",
+          cache: "no-store"
+        });
+
+        if (!response.ok) {
+          throw new Error("读取已保存画像失败。");
+        }
+
+        const payload = (await response.json()) as { profile?: unknown };
+
+        if (!payload.profile) {
+          setSavedProfileMessage(null);
+          return;
+        }
+
+        const result = plannerProfileSchema.safeParse(payload.profile);
+
+        if (!result.success) {
+          setSavedProfileMessage(null);
+          return;
+        }
+
+        setProfile(result.data);
+        setSavedProfileMessage("已自动回填数据库里的用户画像。");
+      } catch (error) {
+        captureClientException(
+          error instanceof Error ? error : new Error("读取数据库画像失败"),
+          {
+            tags: {
+              area: "planner-app",
+              action: "load-db-profile"
+            }
+          }
+        );
+        setSavedProfileMessage(null);
+      } finally {
+        setProfileHydrated(true);
+      }
+    })();
+  }, [mounted, userId]);
+
+  useEffect(() => {
+    if (!mounted || !profileHydrated) {
+      return;
+    }
+
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+
+    saveTimerRef.current = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await fetch("/api/profile", {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(profile)
+          });
+
+          if (!response.ok) {
+            throw new Error("保存用户画像失败。");
+          }
+
+          setSavedProfileMessage("已自动保存到数据库。");
+        } catch (error) {
+          captureClientException(
+            error instanceof Error ? error : new Error("保存数据库画像失败"),
+            {
+              tags: {
+                area: "planner-app",
+                action: "save-db-profile"
+              }
+            }
+          );
+        }
+      })();
+    }, 600);
+
+    return () => {
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, [profile, mounted, profileHydrated, userId]);
+
+  function clearSavedProfile() {
+    setProfile(initialProfile);
+    setSavedProfileMessage("已重置当前画像，稍后会自动同步到数据库。");
+  }
 
   if (!mounted) {
     return (
@@ -398,6 +502,18 @@ export function PlannerApp() {
           <div className="section-head">
             <p className="section-kicker">Profile</p>
             <h2>建立用户画像</h2>
+            <div className="section-actions">
+              {savedProfileMessage ? (
+                <p className="saved-profile-text">{savedProfileMessage}</p>
+              ) : null}
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={clearSavedProfile}
+              >
+                清空已记住画像
+              </button>
+            </div>
           </div>
 
           <label>

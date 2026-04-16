@@ -9,5 +9,5 @@ export default async function Page() {
     redirect("/sign-in" as never);
   }
 
-  return <PlannerApp />;
+  return <PlannerApp userId={userId} />;
 }

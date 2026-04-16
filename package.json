@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "db:migrate": "node scripts/migrate.mjs"
   },
   "dependencies": {
     "@clerk/nextjs": "^6.17.1",
@@ -14,8 +15,10 @@
     "@openrouter/sdk": "latest",
     "@opentelemetry/sdk-node": "^0.214.0",
     "@sentry/nextjs": "^10.48.0",
+    "drizzle-orm": "^0.45.2",
     "eventemitter3": "^5.0.1",
     "next": "latest",
+    "pg": "^8.20.0",
     "react": "latest",
     "react-dom": "latest",
     "zod": "^4.1.12"

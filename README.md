@@ -12,19 +12,20 @@
 - 每道推荐菜谱都可以一键复制
 - 使用 OpenRouter SDK 的多模态能力，而不是前端写死推荐内容
 - 接入 Langfuse 记录 LLM trace，接入 GlitchTip 收集前后端错误
+- 会把当前登录用户的常用画像信息保存到 PostgreSQL，并在下次打开时自动回填
 
 ## 启动
 
 1. 安装依赖
 2. 复制 `.env.example` 为 `.env.local`
-3. 配置 Clerk、OpenRouter、Langfuse 和 GlitchTip 环境变量
+3. 配置 Clerk、OpenRouter、Langfuse、GlitchTip 和 PostgreSQL 环境变量
 4. 运行 `npm run dev`
 
 ## Dokploy / Docker Compose 部署
 
 1. 在 Dokploy 中选择 Docker Compose 部署
 2. 指向本仓库根目录的 `docker-compose.yml`
-3. 在 Dokploy 环境变量中配置 `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`、`CLERK_SECRET_KEY`、`OPENROUTER_API_KEY`、`LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY` 和 `GLITCHTIP_DSN`
+3. 在 Dokploy 环境变量中配置 `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`、`CLERK_SECRET_KEY`、`OPENROUTER_API_KEY`、`LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY`、`GLITCHTIP_DSN` 和 `DATABASE_URL`
 4. 把 `OPENROUTER_APP_URL` 设置为你的线上访问地址，例如 `https://diet.example.com`
 5. 把 `CLERK_AUTHORIZED_PARTIES` 设置为允许访问这个应用的来源，例如 `https://diet.example.com`
 6. 如果宿主机端口冲突，可以把 `APP_PORT` 改成其他空闲端口，例如 `13001`
@@ -45,6 +46,7 @@ docker compose up -d --build
 - 如果你用的是 Langfuse 自托管或美国区，请配置 `LANGFUSE_BASE_URL`
 - GlitchTip 建议同时配置 `GLITCHTIP_DSN` 和 `NEXT_PUBLIC_GLITCHTIP_DSN`，这样服务端和浏览器错误都能收集
 - `GLITCHTIP_SAMPLE_RATE` 控制错误采样，`GLITCHTIP_TRACES_SAMPLE_RATE` 控制性能链路采样
+- PostgreSQL 需要配置 `DATABASE_URL`，并在部署前或启动时先执行 migration 创建 `user_profiles` 表
 - Clerk 至少需要配置 `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` 和 `CLERK_SECRET_KEY`
 - 生产环境请使用 Clerk 的 `pk_live_...` 和 `sk_live_...`，不要继续使用开发 key
 - `CLERK_AUTHORIZED_PARTIES` 支持多个域名，使用英文逗号分隔，例如 `https://diet.example.com,https://admin.example.com`
@@ -54,6 +56,13 @@ docker compose up -d --build
 - Langfuse 会为订单识别、菜谱生成和 JSON 修复创建 trace，方便查看输入、输出、失败原因和多阶段耗时
 - GlitchTip 会收集浏览器端提交失败、复制失败、文件读取失败，以及服务端 API / agent 运行错误
 - 如果没有配置 Langfuse 或 GlitchTip，应用仍可正常运行，只是不会上报对应观测数据
+
+## Database Migration
+
+- 迁移文件在 `[drizzle/0000_create_user_profiles.sql](/Users/rongkailiu/Documents/Playground/drizzle/0000_create_user_profiles.sql)`
+- 运行迁移使用 `npm run db:migrate`
+- 迁移脚本会创建 `app_migrations` 记录表，并只执行尚未应用的 SQL 文件
+- Docker / Dokploy 启动时也会自动先跑一次迁移，再启动 Next.js 服务
 
 ## Clerk 生产部署检查
 

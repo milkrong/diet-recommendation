@@ -154,6 +154,20 @@ body::before {
   line-height: 1.12;
 }
 
+.section-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.saved-profile-text {
+  margin: 0;
+  color: #36523a;
+  font-size: 0.9rem;
+}
+
 label,
 legend {
   display: block;
@@ -228,6 +242,22 @@ fieldset {
 .submit-button:disabled {
   cursor: wait;
   opacity: 0.82;
+}
+
+.ghost-button {
+  border: 1px solid rgba(73, 56, 39, 0.18);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--accent-strong);
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 0.88rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ghost-button:hover {
+  border-color: rgba(133, 82, 58, 0.42);
+  background: var(--accent-soft);
 }
 
 .error-text {
@@ -498,6 +528,11 @@ fieldset {
 }
 
 @media (max-width: 640px) {
+  .section-actions {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
   .shell {
     width: min(100% - 18px, 100%);
     padding-top: 12px;

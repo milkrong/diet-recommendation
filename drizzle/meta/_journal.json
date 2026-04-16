@@ -1,0 +1,13 @@
+{
+  "version": "1",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "1",
+      "when": 1776379200000,
+      "tag": "0000_create_user_profiles",
+      "breakpoints": true
+    }
+  ]
+}
