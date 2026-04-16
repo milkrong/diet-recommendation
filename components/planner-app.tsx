@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import type {
   DietPlanResult,
   OrderRecipeRequest,
@@ -27,10 +27,58 @@ const conditionOptions: Array<{ value: ConditionValue; label: string }> = [
   { value: "lactose", label: "乳糖不耐受" }
 ];
 
+const goalOptions: Array<{ value: GoalValue; label: string }> = [
+  { value: "fat-loss", label: "减脂" },
+  { value: "muscle-gain", label: "增肌" },
+  { value: "maintain", label: "维持体重" },
+  { value: "blood-sugar", label: "控糖饮食" },
+  { value: "high-protein", label: "高蛋白" },
+  { value: "low-protein", label: "低蛋白" },
+  { value: "low-fat", label: "低脂" },
+  { value: "low-sodium", label: "低盐" },
+  { value: "low-carb", label: "低碳水" },
+  { value: "high-fiber", label: "高纤维" },
+  { value: "digestive-friendly", label: "肠胃友好" }
+];
+
+const generationSteps = [
+  {
+    stage: "request_received",
+    title: "读取订单",
+    description: "正在整理你上传的截图或粘贴的订单文字。"
+  },
+  {
+    stage: "recognition_started",
+    title: "识别食材",
+    description: "正在从订单中提取蔬菜、肉类、蛋白和主食。"
+  },
+  {
+    stage: "recognition_completed",
+    title: "匹配目标",
+    description: "正在结合多选目标、偏好和健康限制做取舍。"
+  },
+  {
+    stage: "recipe_started",
+    title: "生成菜谱",
+    description: "正在把可用食材组合成好执行的家常做法。"
+  },
+  {
+    stage: "recipe_completed",
+    title: "整理结果",
+    description: "正在检查格式、步骤和风险提醒。"
+  }
+];
+
+type SseProgressPayload = {
+  stage: string;
+  message: string;
+  detail?: unknown;
+};
+
 const initialProfile: PlannerProfile = {
   name: "",
   age: "",
-  goal: "fat-loss",
+  goals: ["fat-loss"],
   schedule: "busy",
   preferences: ["meat"],
   conditions: [],
@@ -44,14 +92,55 @@ function toggleItem<T extends string>(items: T[], target: T) {
     : [...items, target];
 }
 
+function toggleRequiredItem<T extends string>(items: T[], target: T) {
+  if (items.includes(target)) {
+    return items.length > 1 ? items.filter((item) => item !== target) : items;
+  }
+
+  return [...items, target];
+}
+
 export function PlannerApp() {
+  const [mounted, setMounted] = useState(false);
   const [profile, setProfile] = useState<PlannerProfile>(initialProfile);
   const [orderImageDataUrl, setOrderImageDataUrl] = useState("");
   const [orderText, setOrderText] = useState("");
   const [result, setResult] = useState<DietPlanResult | null>(null);
   const [copiedRecipe, setCopiedRecipe] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [progressStep, setProgressStep] = useState(0);
+  const [progressMessage, setProgressMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  if (!mounted) {
+    return (
+      <main className="shell">
+        <section className="hero">
+          <div className="hero-copy">
+            <p className="eyebrow">Diet Agent Shanghai</p>
+            <h1>上传买菜订单截图，或粘贴订单文字，让 agent 识别你买了什么再推荐菜谱。</h1>
+            <p className="hero-text">
+              正在加载交互表单，马上就可以开始生成菜谱。
+            </p>
+          </div>
+          <div className="hero-meta">
+            <div>
+              <span>输入</span>
+              <strong>订单截图或文字 / 目标 / 偏好 / 疾病 / 训练频率</strong>
+            </div>
+            <div>
+              <span>输出</span>
+              <strong>识别到的食材 + 个性化菜谱建议</strong>
+            </div>
+          </div>
+        </section>
+      </main>
+    );
+  }
 
   async function copyRecipe(recipe: DietPlanResult["recipeSuggestions"][number]) {
     const text = [
@@ -77,6 +166,80 @@ export function PlannerApp() {
     }
   }
 
+  function updateProgress(payload: SseProgressPayload) {
+    const stepIndex = generationSteps.findIndex((step) => step.stage === payload.stage);
+
+    if (stepIndex >= 0) {
+      setProgressStep(stepIndex);
+    }
+
+    if (payload.stage === "completed") {
+      setProgressStep(generationSteps.length - 1);
+    }
+
+    setProgressMessage(payload.message);
+  }
+
+  function handleSseEvent(eventType: string, data: string) {
+    const parsed = JSON.parse(data) as unknown;
+
+    if (eventType === "progress") {
+      updateProgress(parsed as SseProgressPayload);
+      return;
+    }
+
+    if (eventType === "complete") {
+      setProgressStep(generationSteps.length - 1);
+      setResult(parsed as DietPlanResult);
+      return;
+    }
+
+    if (eventType === "error") {
+      const message =
+        typeof parsed === "object" && parsed && "message" in parsed
+          ? String((parsed as { message?: string }).message)
+          : "推荐生成失败，请稍后重试。";
+      throw new Error(message);
+    }
+  }
+
+  async function consumeSseResponse(response: Response) {
+    if (!response.body) {
+      throw new Error("浏览器没有收到可读取的流式响应。");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split("\n\n");
+      buffer = chunks.pop() || "";
+
+      for (const chunk of chunks) {
+        const eventLine = chunk
+          .split("\n")
+          .find((line) => line.startsWith("event:"));
+        const dataLines = chunk
+          .split("\n")
+          .filter((line) => line.startsWith("data:"));
+
+        if (!eventLine || dataLines.length === 0) continue;
+
+        const eventType = eventLine.replace("event:", "").trim();
+        const data = dataLines
+          .map((line) => line.replace("data:", "").trim())
+          .join("\n");
+
+        handleSseEvent(eventType, data);
+      }
+    }
+  }
+
   async function handleFileChange(file: File | null) {
     if (!file) {
       setOrderImageDataUrl("");
@@ -96,6 +259,9 @@ export function PlannerApp() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoading(true);
+    setResult(null);
+    setProgressStep(0);
+    setProgressMessage("正在提交订单和用户画像。");
     setError(null);
 
     try {
@@ -109,7 +275,7 @@ export function PlannerApp() {
         orderText
       };
 
-      const response = await fetch("/api/recommend", {
+      const response = await fetch("/api/recommend/stream", {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -117,13 +283,7 @@ export function PlannerApp() {
         body: JSON.stringify(payloadBody)
       });
 
-      const payload = (await response.json()) as DietPlanResult | { error: string };
-
-      if (!response.ok || "error" in payload) {
-        throw new Error("error" in payload ? payload.error : "推荐失败");
-      }
-
-      setResult(payload);
+      await consumeSseResponse(response);
     } catch (submitError) {
       setError(
         submitError instanceof Error
@@ -230,32 +390,28 @@ export function PlannerApp() {
             </label>
           </div>
 
-          <div className="field-grid">
-            <label>
-              目标
-              <select
-                value={profile.goal}
-                onChange={(event) =>
-                  setProfile((current) => ({
-                    ...current,
-                    goal: event.target.value as GoalValue
-                  }))
-                }
-              >
-                <option value="fat-loss">减脂</option>
-                <option value="muscle-gain">增肌</option>
-                <option value="maintain">维持体重</option>
-                <option value="blood-sugar">控糖饮食</option>
-                <option value="high-protein">高蛋白</option>
-                <option value="low-protein">低蛋白</option>
-                <option value="low-fat">低脂</option>
-                <option value="low-sodium">低盐</option>
-                <option value="low-carb">低碳水</option>
-                <option value="high-fiber">高纤维</option>
-                <option value="digestive-friendly">肠胃友好</option>
-              </select>
-            </label>
+          <fieldset>
+            <legend>目标（可多选）</legend>
+            <div className="chip-grid">
+              {goalOptions.map((option) => (
+                <label className="chip" key={option.value}>
+                  <input
+                    type="checkbox"
+                    checked={profile.goals.includes(option.value)}
+                    onChange={() =>
+                      setProfile((current) => ({
+                        ...current,
+                        goals: toggleRequiredItem(current.goals, option.value)
+                      }))
+                    }
+                  />
+                  {option.label}
+                </label>
+              ))}
+            </div>
+          </fieldset>
 
+          <div className="field-grid">
             <label>
               日常节奏
               <select
@@ -336,7 +492,36 @@ export function PlannerApp() {
         </form>
 
         <div className="panel result-panel">
-          {result ? (
+          {loading ? (
+            <div className="progress-state">
+              <p className="section-kicker">Generating</p>
+              <h2>正在生成菜谱</h2>
+              <p>
+                {progressMessage ||
+                  "这个过程通常需要十几秒，订单截图越复杂会越久。下面是当前处理进度。"}
+              </p>
+              <div className="progress-list">
+                {generationSteps.map((step, index) => (
+                  <div
+                    className={`progress-item ${
+                      index < progressStep
+                        ? "is-done"
+                        : index === progressStep
+                          ? "is-active"
+                          : ""
+                    }`}
+                    key={step.title}
+                  >
+                    <span>{index < progressStep ? "完成" : index === progressStep ? "处理中" : "等待"}</span>
+                    <div>
+                      <strong>{step.title}</strong>
+                      <p>{step.description}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : result ? (
             <div className="result-stack">
               <div className="result-head">
                 <div>

@@ -17,7 +17,7 @@ export const profileContextTool = tool({
     trainingFrequency: z.string()
   }),
   execute: async (profile) => {
-    const goalMap: Record<PlannerProfile["goal"], string> = {
+    const goalMap: Record<PlannerProfile["goals"][number], string> = {
       "fat-loss": "以减脂和饱腹感控制为主",
       "muscle-gain": "以增肌和蛋白质充足为主",
       maintain: "以均衡稳定为主",
@@ -39,7 +39,7 @@ export const profileContextTool = tool({
 
     return {
       userLabel: profile.name || "这位用户",
-      objective: goalMap[profile.goal],
+      objective: profile.goals.map((goal) => goalMap[goal]).join("；"),
       scheduleStyle: scheduleMap[profile.schedule],
       preferences: profile.preferences,
       conditions: profile.conditions,

@@ -40,7 +40,7 @@ export type ScheduleValue = (typeof scheduleValues)[number];
 export type PlannerProfile = {
   name: string;
   age: string;
-  goal: GoalValue;
+  goals: GoalValue[];
   schedule: ScheduleValue;
   preferences: PreferenceValue[];
   conditions: ConditionValue[];
@@ -56,7 +56,7 @@ export type OrderRecipeRequest = PlannerProfile & {
 export const plannerProfileSchema = z.object({
   name: z.string(),
   age: z.string(),
-  goal: z.enum(goalValues),
+  goals: z.array(z.enum(goalValues)).min(1),
   schedule: z.enum(scheduleValues),
   preferences: z.array(z.enum(preferenceValues)),
   conditions: z.array(z.enum(conditionValues)),
@@ -64,10 +64,28 @@ export const plannerProfileSchema = z.object({
   notes: z.string()
 });
 
-export const orderRecipeRequestSchema = plannerProfileSchema.extend({
+export const legacyPlannerProfileSchema = plannerProfileSchema
+  .omit({ goals: true })
+  .extend({
+    goal: z.enum(goalValues)
+  })
+  .transform((value) => {
+    const { goal, ...profile } = value;
+    return {
+      ...profile,
+      goals: [goal]
+    };
+  });
+
+const orderInputSchema = {
   orderImageDataUrl: z.string().optional(),
   orderText: z.string().optional()
-}).refine(
+};
+
+export const orderRecipeRequestSchema = z.union([
+  plannerProfileSchema.extend(orderInputSchema),
+  legacyPlannerProfileSchema.and(z.object(orderInputSchema))
+]).refine(
   (value) =>
     Boolean(value.orderImageDataUrl?.trim()) || Boolean(value.orderText?.trim()),
   {
@@ -75,19 +93,19 @@ export const orderRecipeRequestSchema = plannerProfileSchema.extend({
   }
 );
 
+export const recognizedItemSchema = z.object({
+  name: z.string(),
+  evidence: z.string(),
+  confidence: z.string()
+});
+
 export const dietPlanResultSchema = z.object({
   planTitle: z.string(),
   positioning: z.string(),
   goalSummary: z.string(),
   nutritionFocus: z.string(),
   executionStyle: z.string(),
-  recognizedItems: z.array(
-    z.object({
-      name: z.string(),
-      evidence: z.string(),
-      confidence: z.string()
-    })
-  ),
+  recognizedItems: z.array(recognizedItemSchema),
   recipeSuggestions: z.array(
     z.object({
       title: z.string(),
@@ -102,3 +120,4 @@ export const dietPlanResultSchema = z.object({
 });
 
 export type DietPlanResult = z.infer<typeof dietPlanResultSchema>;
+export type RecognizedItem = z.infer<typeof recognizedItemSchema>;
