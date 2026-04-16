@@ -1,5 +1,6 @@
 import { auth } from "@clerk/nextjs/server";
 import { runDietPlannerAgent } from "@/lib/diet-agent";
+import { captureException } from "@/lib/observability/sentry";
 import type { OrderRecipeRequest } from "@/lib/schema";
 
 function formatSse(event: string, data: unknown) {
@@ -62,6 +63,12 @@ export async function POST(request: Request) {
 
         send("complete", result);
       } catch (error) {
+        captureException(error, {
+          tags: {
+            area: "api",
+            route: "/api/recommend/stream"
+          }
+        });
         send("error", {
           message:
             error instanceof Error ? error.message : "推荐生成失败，请稍后重试。"

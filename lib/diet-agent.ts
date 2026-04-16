@@ -6,6 +6,13 @@ import {
   type OrderRecipeRequest,
   type RecognizedItem
 } from "@/lib/schema";
+import { captureException } from "@/lib/observability/sentry";
+import {
+  getActiveTraceId,
+  propagateAttributes,
+  startActiveObservation,
+  startObservation
+} from "@langfuse/tracing";
 import { createAgent } from "@/lib/openrouter-agent";
 import { extractJsonObject } from "@/lib/openrouter-json";
 import { defaultDietTools } from "@/lib/openrouter-tools";
@@ -34,6 +41,44 @@ export type DietAgentProgressEvent = {
 type DietAgentOptions = {
   onProgress?: (event: DietAgentProgressEvent) => void;
 };
+
+function serializeProfileForTelemetry(profile: OrderRecipeRequest) {
+  return {
+    name: profile.name || undefined,
+    age: profile.age || undefined,
+    goals: profile.goals,
+    schedule: profile.schedule,
+    preferences: profile.preferences,
+    conditions: profile.conditions,
+    trainingFrequency: profile.trainingFrequency || undefined,
+    notesPreview: profile.notes ? profile.notes.slice(0, 200) : undefined,
+    orderTextPreview: profile.orderText ? profile.orderText.slice(0, 300) : undefined,
+    hasOrderImage: Boolean(profile.orderImageDataUrl)
+  };
+}
+
+function extractUsageDetails(response: unknown) {
+  const usage =
+    (response as { usage?: {
+      inputTokens?: number;
+      outputTokens?: number;
+      totalTokens?: number;
+      inputTokensDetails?: { cachedTokens?: number };
+      outputTokensDetails?: { reasoningTokens?: number };
+    } | null })?.usage;
+
+  if (!usage) {
+    return undefined;
+  }
+
+  return {
+    prompt_tokens: usage.inputTokens ?? 0,
+    completion_tokens: usage.outputTokens ?? 0,
+    total_tokens: usage.totalTokens ?? 0,
+    cached_tokens: usage.inputTokensDetails?.cachedTokens ?? 0,
+    reasoning_tokens: usage.outputTokensDetails?.reasoningTokens ?? 0
+  };
+}
 
 const recognizedItemsResultSchema = z.object({
   recognizedItems: z.array(recognizedItemSchema)
@@ -219,6 +264,9 @@ function parseJsonWithSchema<T>(rawText: string, schema: z.ZodType<T>) {
 
 async function generateChatText(profile: OrderRecipeRequest, prompt: string) {
   const client = createOpenRouterClient();
+  const model = profile.orderImageDataUrl
+    ? process.env.OPENROUTER_VISION_MODEL || process.env.OPENROUTER_MODEL || "openrouter/auto"
+    : process.env.OPENROUTER_MODEL || "openrouter/auto";
   const messageContent: OpenRouterChatContentPart[] = [
     {
       type: "text",
@@ -236,26 +284,60 @@ async function generateChatText(profile: OrderRecipeRequest, prompt: string) {
     });
   }
 
-  const response = await client.chat.send({
-    httpReferer: process.env.OPENROUTER_APP_URL,
-    appTitle: process.env.OPENROUTER_APP_NAME || "Diet Agent Shanghai",
-    chatGenerationParams: {
-      model: profile.orderImageDataUrl
-        ? process.env.OPENROUTER_VISION_MODEL || process.env.OPENROUTER_MODEL || "openrouter/auto"
-        : process.env.OPENROUTER_MODEL || "openrouter/auto",
-      messages: [
-        {
-          role: "user",
-          content: messageContent
-        }
-      ],
-      responseFormat: {
-        type: "json_object"
+  const generation = startObservation(
+    "order-ingredient-recognition",
+    {
+      model,
+      input: {
+        prompt,
+        hasOrderImage: Boolean(profile.orderImageDataUrl),
+        orderTextPreview: profile.orderText?.slice(0, 300) || undefined
+      },
+      metadata: {
+        feature: "diet-recommendation",
+        stage: "recognition"
       }
-    }
-  });
+    },
+    { asType: "generation" }
+  );
 
-  return extractAssistantText(response);
+  try {
+    const response = await client.chat.send({
+      httpReferer: process.env.OPENROUTER_APP_URL,
+      appTitle: process.env.OPENROUTER_APP_NAME || "Diet Agent Shanghai",
+      chatGenerationParams: {
+        model,
+        messages: [
+          {
+            role: "user",
+            content: messageContent
+          }
+        ],
+        responseFormat: {
+          type: "json_object"
+        }
+      }
+    });
+
+    const assistantText = extractAssistantText(response);
+    generation.update({
+      output: assistantText,
+      usageDetails: extractUsageDetails(response)
+    });
+
+    return assistantText;
+  } catch (error) {
+    generation.update({
+      level: "ERROR",
+      statusMessage: error instanceof Error ? error.message : "订单识别调用失败",
+      output: {
+        error: error instanceof Error ? error.message : String(error)
+      }
+    });
+    throw error;
+  } finally {
+    generation.end();
+  }
 }
 
 async function repairJson<T>(
@@ -269,9 +351,45 @@ async function repairJson<T>(
     message: "模型返回格式不稳定，正在自动修复 JSON。"
   });
 
-  const repairAgent = createDietAgent();
-  const repairedText = await repairAgent.sendSync(buildRepairPrompt(rawText, error));
-  return parseJsonWithSchema(repairedText, schema);
+  const repairObservation = startObservation(
+    "repair-invalid-json",
+    {
+      input: {
+        rawTextPreview: rawText.slice(0, 600),
+        errorMessage: error instanceof Error ? error.message : String(error)
+      },
+      metadata: {
+        stage: "repair"
+      }
+    }
+  );
+
+  try {
+    const repairAgent = createDietAgent();
+    const repairedText = await repairAgent.sendSync(buildRepairPrompt(rawText, error));
+    const repaired = parseJsonWithSchema(repairedText, schema);
+
+    repairObservation.update({
+      output: {
+        repaired: true
+      }
+    });
+
+    return repaired;
+  } catch (repairError) {
+    repairObservation.update({
+      level: "ERROR",
+      statusMessage:
+        repairError instanceof Error ? repairError.message : "JSON 修复失败",
+      output: {
+        repaired: false,
+        error: repairError instanceof Error ? repairError.message : String(repairError)
+      }
+    });
+    throw repairError;
+  } finally {
+    repairObservation.end();
+  }
 }
 
 async function recognizeItems(profile: OrderRecipeRequest, options?: DietAgentOptions) {
@@ -306,13 +424,59 @@ async function generateRecipes(
     }
   });
 
-  const agent = createDietAgent();
-  const rawText = await agent.sendSync(buildRecipePrompt(profile, recognizedItems));
+  const recipeGeneration = startObservation(
+    "generate-recipe-plan",
+    {
+      model: process.env.OPENROUTER_MODEL || "openrouter/auto",
+      input: {
+        profile: serializeProfileForTelemetry(profile),
+        recognizedItems
+      },
+      metadata: {
+        recognizedCount: recognizedItems.length,
+        stage: "recipe"
+      }
+    },
+    { asType: "generation" }
+  );
+
+  let rawText = "";
 
   try {
-    return parseJsonWithSchema(rawText, dietPlanResultSchema);
+    const agent = createDietAgent();
+    rawText = await agent.sendSync(buildRecipePrompt(profile, recognizedItems));
   } catch (error) {
-    return repairJson(rawText, error, dietPlanResultSchema, options);
+    recipeGeneration.update({
+      level: "ERROR",
+      statusMessage: error instanceof Error ? error.message : "菜谱生成失败",
+      output: {
+        error: error instanceof Error ? error.message : String(error)
+      }
+    });
+    throw error;
+  }
+
+  try {
+    const parsed = parseJsonWithSchema(rawText, dietPlanResultSchema);
+    recipeGeneration.update({
+      output: {
+        planTitle: parsed.planTitle,
+        recipeCount: parsed.recipeSuggestions.length
+      }
+    });
+    return parsed;
+  } catch (error) {
+    const repaired = await repairJson(rawText, error, dietPlanResultSchema, options);
+    recipeGeneration.update({
+      output: {
+        planTitle: repaired.planTitle,
+        recipeCount: repaired.recipeSuggestions.length,
+        repaired: true
+      }
+    });
+    return repaired;
+  } finally {
+    recipeGeneration.end();
   }
 }
 
@@ -327,36 +491,88 @@ export async function runDietPlannerAgent(
     message: "已收到订单和用户画像，开始生成。"
   });
 
-  try {
-    const recognizedItems = await recognizeItems(profile, options);
+  return propagateAttributes(
+    {
+      userId: profile.name || undefined,
+      tags: ["diet-agent", "recipe-recommendation"]
+    },
+    async () =>
+      startActiveObservation(
+        "diet-planner-run",
+        async (rootObservation) => {
+          rootObservation.update({
+            input: serializeProfileForTelemetry(profile),
+            metadata: {
+              feature: "diet-recommendation"
+            }
+          });
 
-    options?.onProgress?.({
-      stage: "recognition_completed",
-      message: `已识别 ${recognizedItems.length} 个食材，开始生成菜谱。`,
-      detail: {
-        recognizedItems
-      }
-    });
+          try {
+            const recognizedItems = await recognizeItems(profile, options);
 
-    const plan = await generateRecipes(profile, recognizedItems, options);
+            options?.onProgress?.({
+              stage: "recognition_completed",
+              message: `已识别 ${recognizedItems.length} 个食材，开始生成菜谱。`,
+              detail: {
+                recognizedItems
+              }
+            });
 
-    options?.onProgress?.({
-      stage: "recipe_completed",
-      message: `已生成 ${plan.recipeSuggestions.length} 道菜谱，正在整理结果。`
-    });
+            const plan = await generateRecipes(profile, recognizedItems, options);
 
-    options?.onProgress?.({
-      stage: "completed",
-      message: "菜谱推荐已完成。"
-    });
+            options?.onProgress?.({
+              stage: "recipe_completed",
+              message: `已生成 ${plan.recipeSuggestions.length} 道菜谱，正在整理结果。`
+            });
 
-    return plan;
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "模型输出无法稳定解析";
+            options?.onProgress?.({
+              stage: "completed",
+              message: "菜谱推荐已完成。"
+            });
 
-    throw new Error(
-      `推荐生成失败。系统已经尝试自动修复 JSON。原始原因：${message}`
-    );
-  }
+            rootObservation.update({
+              output: {
+                traceId: getActiveTraceId(),
+                recognizedCount: recognizedItems.length,
+                recipeCount: plan.recipeSuggestions.length,
+                planTitle: plan.planTitle
+              }
+            });
+
+            return plan;
+          } catch (error) {
+            const normalizedError =
+              error instanceof Error ? error : new Error(String(error));
+
+            rootObservation.update({
+              level: "ERROR",
+              statusMessage: normalizedError.message,
+              output: {
+                traceId: getActiveTraceId(),
+                error: normalizedError.message
+              }
+            });
+
+            captureException(normalizedError, {
+              tags: {
+                area: "diet-agent",
+                trace_id: getActiveTraceId() || "unknown"
+              },
+              extra: {
+                profile: serializeProfileForTelemetry(profile)
+              }
+            });
+
+            throw new Error(
+              `推荐生成失败。系统已经尝试自动修复 JSON。原始原因：${normalizedError.message}`
+            );
+          } finally {
+            rootObservation.end();
+          }
+        },
+        {
+          endOnExit: false
+        }
+      )
+  );
 }

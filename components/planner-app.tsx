@@ -1,6 +1,7 @@
 "use client";
 
 import { UserButton } from "@clerk/nextjs";
+import * as Sentry from "@sentry/nextjs";
 import { FormEvent, useEffect, useState } from "react";
 import type {
   DietPlanResult,
@@ -11,6 +12,29 @@ import type {
   GoalValue,
   ScheduleValue
 } from "@/lib/schema";
+
+function captureClientException(
+  error: unknown,
+  context?: {
+    tags?: Record<string, string>;
+    extra?: Record<string, unknown>;
+  }
+) {
+  const normalizedError =
+    error instanceof Error ? error : new Error(String(error));
+
+  Sentry.withScope((scope) => {
+    Object.entries(context?.tags || {}).forEach(([key, value]) => {
+      scope.setTag(key, value);
+    });
+
+    Object.entries(context?.extra || {}).forEach(([key, value]) => {
+      scope.setExtra(key, value);
+    });
+
+    Sentry.captureException(normalizedError);
+  });
+}
 
 const preferenceOptions: Array<{ value: PreferenceValue; label: string }> = [
   { value: "meat", label: "爱吃肉" },
@@ -163,7 +187,16 @@ export function PlannerApp() {
       await navigator.clipboard.writeText(text);
       setCopiedRecipe(recipe.title);
       window.setTimeout(() => setCopiedRecipe(null), 1800);
-    } catch {
+    } catch (error) {
+      captureClientException(error instanceof Error ? error : new Error("复制菜谱失败"), {
+        tags: {
+          area: "planner-app",
+          action: "copy-recipe"
+        },
+        extra: {
+          recipeTitle: recipe.title
+        }
+      });
       setError("复制失败，请检查浏览器剪贴板权限。");
     }
   }
@@ -248,14 +281,32 @@ export function PlannerApp() {
       return;
     }
 
-    const reader = new FileReader();
-    const dataUrl = await new Promise<string>((resolve, reject) => {
-      reader.onload = () => resolve(String(reader.result || ""));
-      reader.onerror = () => reject(new Error("截图读取失败"));
-      reader.readAsDataURL(file);
-    });
+    try {
+      const reader = new FileReader();
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("截图读取失败"));
+        reader.readAsDataURL(file);
+      });
 
-    setOrderImageDataUrl(dataUrl);
+      setOrderImageDataUrl(dataUrl);
+    } catch (error) {
+      captureClientException(
+        error instanceof Error ? error : new Error("订单截图读取失败"),
+        {
+          tags: {
+            area: "planner-app",
+            action: "read-order-image"
+          },
+          extra: {
+            fileName: file.name,
+            fileType: file.type,
+            fileSize: file.size
+          }
+        }
+      );
+      setError("订单截图读取失败，请重试或直接粘贴订单文字。");
+    }
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -287,6 +338,23 @@ export function PlannerApp() {
 
       await consumeSseResponse(response);
     } catch (submitError) {
+      captureClientException(
+        submitError instanceof Error
+          ? submitError
+          : new Error("生成饮食计划时发生未知错误。"),
+        {
+          tags: {
+            area: "planner-app",
+            action: "submit-plan-request"
+          },
+          extra: {
+            hasOrderImage: Boolean(orderImageDataUrl),
+            hasOrderText: Boolean(orderText.trim()),
+            goals: profile.goals,
+            schedule: profile.schedule
+          }
+        }
+      );
       setError(
         submitError instanceof Error
           ? submitError.message
