@@ -23,9 +23,10 @@
 
 1. 在 Dokploy 中选择 Docker Compose 部署
 2. 指向本仓库根目录的 `docker-compose.yml`
-3. 在 Dokploy 环境变量中配置 `OPENROUTER_API_KEY`
-4. 如果使用自定义域名，把 `OPENROUTER_APP_URL` 设置为你的线上访问地址
-5. 如果宿主机端口冲突，可以把 `APP_PORT` 改成其他空闲端口，例如 `13001`
+3. 在 Dokploy 环境变量中配置 `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`、`CLERK_SECRET_KEY` 和 `OPENROUTER_API_KEY`
+4. 把 `OPENROUTER_APP_URL` 设置为你的线上访问地址，例如 `https://diet.example.com`
+5. 把 `CLERK_AUTHORIZED_PARTIES` 设置为允许访问这个应用的来源，例如 `https://diet.example.com`
+6. 如果宿主机端口冲突，可以把 `APP_PORT` 改成其他空闲端口，例如 `13001`
 
 本地也可以直接运行：
 
@@ -40,3 +41,13 @@ docker compose up -d --build
 - 如果你想切换模型，可以在 `.env.local` 中覆盖 `OPENROUTER_MODEL`
 - 如果你想单独给截图识别指定模型，可以在 `.env.local` 里设置 `OPENROUTER_VISION_MODEL`
 - Clerk 至少需要配置 `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` 和 `CLERK_SECRET_KEY`
+- 生产环境请使用 Clerk 的 `pk_live_...` 和 `sk_live_...`，不要继续使用开发 key
+- `CLERK_AUTHORIZED_PARTIES` 支持多个域名，使用英文逗号分隔，例如 `https://diet.example.com,https://admin.example.com`
+
+## Clerk 生产部署检查
+
+1. 在 Clerk Dashboard 创建 production instance
+2. 把部署环境变量换成 production instance 的 `pk_live_...` 和 `sk_live_...`
+3. 在 Clerk Dashboard 配置你的生产域名和 DNS
+4. 如果启用 Google、微信等第三方登录，记得换成你自己的生产 OAuth 凭证
+5. 在 Dokploy 中重新部署应用，让新的 Clerk 环境变量生效

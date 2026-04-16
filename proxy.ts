@@ -5,11 +5,29 @@ const isProtectedRoute = createRouteMatcher([
   "/api/recommend(.*)"
 ]);
 
-export default clerkMiddleware(async (auth, req) => {
-  if (isProtectedRoute(req)) {
-    await auth.protect();
+function getAuthorizedParties() {
+  const value = process.env.CLERK_AUTHORIZED_PARTIES?.trim();
+
+  if (!value) {
+    return undefined;
   }
-});
+
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+export default clerkMiddleware(
+  async (auth, req) => {
+    if (isProtectedRoute(req)) {
+      await auth.protect();
+    }
+  },
+  {
+    authorizedParties: getAuthorizedParties()
+  }
+);
 
 export const config = {
   matcher: [
