@@ -44,42 +44,80 @@ export async function POST(request: Request) {
   }
 
   const profile = (await request.json()) as OrderRecipeRequest;
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+  const writer = writable.getWriter();
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      const send = (event: string, data: unknown) => {
-        controller.enqueue(encoder.encode(formatSse(event, data)));
-      };
+  let closed = false;
 
-      try {
-        send("progress", {
-          stage: "request_received",
-          message: "服务端已收到请求，正在准备 agent。"
-        });
+  const close = async () => {
+    if (closed) {
+      return;
+    }
 
-        const result = await runDietPlannerAgent(profile, {
-          onProgress: (event) => send("progress", event)
-        });
+    closed = true;
 
-        send("complete", result);
-      } catch (error) {
-        captureException(error, {
-          tags: {
-            area: "api",
-            route: "/api/recommend/stream"
-          }
-        });
-        send("error", {
+    try {
+      await writer.close();
+    } catch {
+      // Ignore writer-close races caused by disconnects or duplicate close attempts.
+    }
+  };
+
+  const send = async (event: string, data: unknown) => {
+    if (closed) {
+      return false;
+    }
+
+    try {
+      await writer.write(encoder.encode(formatSse(event, data)));
+      return true;
+    } catch {
+      closed = true;
+      return false;
+    }
+  };
+
+  const abortHandler = () => {
+    void close();
+  };
+
+  request.signal.addEventListener("abort", abortHandler, { once: true });
+
+  void (async () => {
+    try {
+      await send("progress", {
+        stage: "request_received",
+        message: "服务端已收到请求，正在准备 agent。"
+      });
+
+      const result = await runDietPlannerAgent(profile, {
+        onProgress: (event) => {
+          void send("progress", event);
+        }
+      });
+
+      await send("complete", result);
+    } catch (error) {
+      captureException(error, {
+        tags: {
+          area: "api",
+          route: "/api/recommend/stream"
+        }
+      });
+
+      if (!closed) {
+        await send("error", {
           message:
             error instanceof Error ? error.message : "推荐生成失败，请稍后重试。"
         });
-      } finally {
-        controller.close();
       }
+    } finally {
+      request.signal.removeEventListener("abort", abortHandler);
+      await close();
     }
-  });
+  })();
 
-  return new Response(stream, {
+  return new Response(readable, {
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
