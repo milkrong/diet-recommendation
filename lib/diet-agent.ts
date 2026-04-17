@@ -406,6 +406,9 @@ function extractAssistantText(response: unknown) {
   const content =
     (response as { choices?: Array<{ message?: { content?: unknown } }> })?.choices?.[0]
       ?.message?.content;
+  const reasoning =
+    (response as { choices?: Array<{ message?: { reasoning?: unknown } }> })?.choices?.[0]
+      ?.message?.reasoning;
 
   if (typeof content === "string") {
     return content;
@@ -423,6 +426,14 @@ function extractAssistantText(response: unknown) {
 
   if (content && typeof content === "object") {
     return JSON.stringify(content);
+  }
+
+  if (typeof reasoning === "string" && reasoning.trim()) {
+    return reasoning;
+  }
+
+  if (reasoning && typeof reasoning === "object") {
+    return JSON.stringify(reasoning);
   }
 
   const output = (response as { output?: unknown })?.output;

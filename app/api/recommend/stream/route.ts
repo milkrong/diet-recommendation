@@ -1,5 +1,7 @@
+import { after } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { runDietPlannerAgent } from "@/lib/diet-agent";
+import { forceFlushLangfuse } from "@/lib/observability/langfuse.server";
 import { captureException } from "@/lib/observability/sentry";
 import type { OrderRecipeRequest } from "@/lib/schema";
 
@@ -82,6 +84,9 @@ export async function POST(request: Request) {
   };
 
   request.signal.addEventListener("abort", abortHandler, { once: true });
+  after(async () => {
+    await forceFlushLangfuse();
+  });
 
   void (async () => {
     try {
