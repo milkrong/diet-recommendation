@@ -41,6 +41,16 @@ type DietAgentOptions = {
   onProgress?: (event: DietAgentProgressEvent) => void;
 };
 
+class ModelResponseParseError extends Error {
+  debugPayload?: Record<string, unknown>;
+
+  constructor(message: string, debugPayload?: Record<string, unknown>) {
+    super(message);
+    this.name = "ModelResponseParseError";
+    this.debugPayload = debugPayload;
+  }
+}
+
 const recognizedItemsJsonSchema = {
   name: "recognized_items_result",
   strict: true,
@@ -176,6 +186,55 @@ function extractUsageDetails(response: unknown) {
     total_tokens: usage.totalTokens ?? 0,
     cached_tokens: usage.inputTokensDetails?.cachedTokens ?? 0,
     reasoning_tokens: usage.outputTokensDetails?.reasoningTokens ?? 0
+  };
+}
+
+function truncateForDebug(value: unknown, maxLength = 1500) {
+  if (typeof value === "string") {
+    return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
+  }
+
+  try {
+    const json = JSON.stringify(value);
+    return json.length > maxLength ? `${json.slice(0, maxLength)}...` : json;
+  } catch {
+    return String(value);
+  }
+}
+
+function summarizeModelResponse(response: unknown) {
+  const typed = response as {
+    id?: unknown;
+    model?: unknown;
+    outputText?: unknown;
+    output?: unknown;
+    usage?: unknown;
+    choices?: Array<{ message?: { content?: unknown; refusal?: unknown; reasoning?: unknown } }>;
+  };
+
+  return {
+    id: typed?.id,
+    model: typed?.model,
+    hasOutputText: typed?.outputText !== undefined,
+    outputTextPreview:
+      typeof typed?.outputText === "string"
+        ? truncateForDebug(typed.outputText, 400)
+        : typed?.outputText
+          ? truncateForDebug(typed.outputText, 400)
+          : undefined,
+    hasOutput: typed?.output !== undefined,
+    outputPreview: typed?.output ? truncateForDebug(typed.output, 600) : undefined,
+    usage: typed?.usage,
+    choicesLength: Array.isArray(typed?.choices) ? typed.choices.length : 0,
+    firstChoiceContentPreview: Array.isArray(typed?.choices)
+      ? truncateForDebug(typed.choices[0]?.message?.content, 600)
+      : undefined,
+    firstChoiceRefusal: Array.isArray(typed?.choices)
+      ? typed.choices[0]?.message?.refusal
+      : undefined,
+    firstChoiceReasoning: Array.isArray(typed?.choices)
+      ? truncateForDebug(typed.choices[0]?.message?.reasoning, 300)
+      : undefined
   };
 }
 
@@ -371,7 +430,9 @@ function extractAssistantText(response: unknown) {
     return JSON.stringify(output);
   }
 
-  throw new Error("模型没有返回可解析的文本内容。");
+  throw new ModelResponseParseError("模型没有返回可解析的文本内容。", {
+    responseSummary: summarizeModelResponse(response)
+  });
 }
 
 function parseJsonWithSchema<T>(rawText: string, schema: z.ZodType<T>) {
@@ -472,13 +533,26 @@ async function generateChatText(
 
     return assistantText;
   } catch (error) {
+    const debugPayload =
+      error instanceof ModelResponseParseError ? error.debugPayload : undefined;
+
     generation.update({
       level: "ERROR",
       statusMessage: error instanceof Error ? error.message : "订单识别调用失败",
       output: {
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
+        ...(debugPayload ? { debugPayload } : {})
       }
     });
+
+    if (debugPayload) {
+      console.error("[diet-agent] unparseable model response", {
+        stage: options?.stage || "recognition",
+        observationName: options?.observationName || "openrouter-structured-generation",
+        debugPayload
+      });
+    }
+
     throw error;
   } finally {
     generation.end();
@@ -722,13 +796,16 @@ export async function runDietPlannerAgent(
           } catch (error) {
             const normalizedError =
               error instanceof Error ? error : new Error(String(error));
+            const debugPayload =
+              error instanceof ModelResponseParseError ? error.debugPayload : undefined;
 
             rootObservation.update({
               level: "ERROR",
               statusMessage: normalizedError.message,
               output: {
                 traceId: getActiveTraceId(),
-                error: normalizedError.message
+                error: normalizedError.message,
+                ...(debugPayload ? { debugPayload } : {})
               }
             });
 
@@ -738,7 +815,8 @@ export async function runDietPlannerAgent(
                 trace_id: getActiveTraceId() || "unknown"
               },
               extra: {
-                profile: serializeProfileForTelemetry(profile)
+                profile: serializeProfileForTelemetry(profile),
+                debugPayload
               }
             });
 
