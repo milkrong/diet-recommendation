@@ -89,6 +89,7 @@ const dietPlanJsonSchema = {
       "nutritionFocus",
       "executionStyle",
       "recognizedItems",
+      "suggestedShoppingList",
       "recipeSuggestions",
       "executionTips",
       "cautions"
@@ -109,6 +110,19 @@ const dietPlanJsonSchema = {
             name: { type: "string" },
             evidence: { type: "string" },
             confidence: { type: "string" }
+          }
+        }
+      },
+      suggestedShoppingList: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["name", "quantity", "reason"],
+          properties: {
+            name: { type: "string" },
+            quantity: { type: "string" },
+            reason: { type: "string" }
           }
         }
       },
@@ -243,14 +257,15 @@ const recognizedItemsResultSchema = z.object({
 });
 
 const dietAgentInstructions = `
-你是一名中文营养规划 agent，负责根据买菜 app 订单截图或订单文字识别用户已经购买的食材，并给出结构化、实用、能执行的菜谱建议。
+你是一名中文营养规划 agent，负责根据买菜 app 订单截图、订单文字或仅有的用户画像，给出结构化、实用、能执行的菜谱建议。
 
 你的要求：
 - 推荐内容必须根据用户输入动态生成，不能复读固定模板。
-- 需要先从订单截图或订单文字里识别已购食材，再考虑目标、口味偏好、疾病限制、日常节奏、训练频率和备注。
+- 如果提供了订单截图或订单文字，需要先识别已购食材，再考虑目标、口味偏好、疾病限制、日常节奏、训练频率和备注。
+- 如果没有提供购物清单，需要直接根据用户画像生成菜谱，并补出建议采购清单。
 - 对疾病相关情况给出保守提醒，不要冒充医生，不要提供诊断或药物建议。
-- 不再参考山姆、会员店或商品目录，不要输出采购清单。
-- 菜谱应该尽量优先利用已经买到的食材；如果必须补充，只能是少量基础调味料或常见辅料。
+- 如果有已购食材，菜谱应该尽量优先利用已经买到的食材；如果必须补充，只能是少量基础调味料或常见辅料。
+- 如果没有已购食材，可以输出建议采购清单，但要尽量家常、精简、好买。
 - 如果信息不足，可以做合理假设，但必须在 cautions 中明确说出假设。
 - 只输出 JSON，不要输出 markdown，不要加解释性前言或结尾。
 `.trim();
@@ -276,6 +291,7 @@ function buildProfileText(profile: OrderRecipeRequest) {
       schedule: profile.schedule,
       preferences: profile.preferences,
       conditions: profile.conditions,
+      generationScope: profile.generationScope || "single-meal",
       trainingFrequency: profile.trainingFrequency,
       notes: profile.notes
     },
@@ -314,6 +330,10 @@ JSON 结构：
   `.trim();
 }
 
+function hasOrderInput(profile: OrderRecipeRequest) {
+  return Boolean(profile.orderImageDataUrl?.trim() || profile.orderText?.trim());
+}
+
 function buildRecipePrompt(profile: OrderRecipeRequest, recognizedItems: RecognizedItem[]) {
   const profileContext = buildProfileContext(profile);
   const recipeContext = buildRecipeContext({
@@ -321,9 +341,28 @@ function buildRecipePrompt(profile: OrderRecipeRequest, recognizedItems: Recogni
     trainingFrequency: profile.trainingFrequency,
     notes: profile.notes
   });
+  const generationScope = profile.generationScope || "single-meal";
+  const hasRecognizedItems = recognizedItems.length > 0;
+  const recipeCountRule =
+    generationScope === "full-day"
+      ? "recipeSuggestions 必须严格给出 3 道菜，并且顺序必须是早餐、午餐、晚餐。"
+      : "recipeSuggestions 必须严格给出 1 道菜，表示这一顿最适合做的主推荐。";
+  const scopeRule =
+    generationScope === "full-day"
+      ? "用户这次要的是一天计划，请按早餐、午餐、晚餐三个时段安排，顺序不能错。"
+      : "用户这次只要一顿饭，不要扩展成一天计划。";
+  const sourceRule = hasRecognizedItems
+    ? "本次已经提供了购物清单，请优先围绕现有食材做推荐。"
+    : "本次没有提供购物清单，请直接生成菜谱，并同时补出建议采购清单。";
+  const shoppingListRule = hasRecognizedItems
+    ? "suggestedShoppingList 只允许补充少量缺失但必要的食材或基础配料；如果不需要补充，就返回空数组。"
+    : "suggestedShoppingList 必须给出完成这些菜谱所需的核心采购清单，尽量控制在必要范围内。";
+  const ingredientRule = hasRecognizedItems
+    ? "每道菜尽量复用 recognizedItems 里的食材，不要为了凑数发明太多额外原料。"
+    : "因为用户没有提供购物清单，recipeSuggestions 可以围绕 suggestedShoppingList 里的食材来设计。";
 
   return `
-请基于已经识别出的买菜订单食材，为用户生成个性化菜谱建议，并严格返回 JSON 对象。
+请基于用户已提供的食材信息或用户画像，为用户生成个性化菜谱建议，并严格返回 JSON 对象。
 
 用户画像：
 ${buildProfileText(profile)}
@@ -351,6 +390,13 @@ JSON 必须符合下面的结构要求：
       "confidence": "高/中/低"
     }
   ],
+  "suggestedShoppingList": [
+    {
+      "name": "建议采购的食材",
+      "quantity": "建议数量",
+      "reason": "为什么建议买它"
+    }
+  ],
   "recipeSuggestions": [
     {
       "title": "菜谱名",
@@ -365,10 +411,14 @@ JSON 必须符合下面的结构要求：
 }
 
 补充要求：
+- ${sourceRule}
 - recognizedItems 必须保留上面已识别食材的核心信息。
-- recipeSuggestions 给出 3 到 5 道菜。
-- 每道菜尽量复用 recognizedItems 里的食材，不要为了凑数发明太多额外原料。
+- ${shoppingListRule}
+- ${scopeRule}
+- ${recipeCountRule}
+- ${ingredientRule}
 - 菜谱风格优先家常、好执行、符合用户多选目标。
+- 如果是一天计划，summary 和 fitReason 中要明确这道菜对应早餐、午餐还是晚餐。
 - 所有内容使用简体中文。
   `.trim();
 }
@@ -468,11 +518,20 @@ async function generateChatText(
   }
 ) {
   const client = createOpenRouterClient();
+  const orderImageDataUrl = profile.orderImageDataUrl?.trim();
+  const hasOrderImage = Boolean(options?.includeImage !== false && orderImageDataUrl);
+  const isRecognitionStage = (options?.stage || "recognition") === "recognition";
+  const recognitionModel =
+    process.env.OPENROUTER_RECOGNITION_MODEL || process.env.OPENROUTER_MODEL;
   const model =
     options?.model ||
-    (options?.includeImage !== false && profile.orderImageDataUrl
-      ? process.env.OPENROUTER_VISION_MODEL || process.env.OPENROUTER_MODEL || "openrouter/auto"
-      : process.env.OPENROUTER_MODEL || "openrouter/auto");
+    (isRecognitionStage
+      ? hasOrderImage
+        ? process.env.OPENROUTER_VISION_MODEL || recognitionModel || "openrouter/auto"
+        : recognitionModel || "openrouter/auto"
+      : hasOrderImage
+        ? process.env.OPENROUTER_VISION_MODEL || process.env.OPENROUTER_MODEL || "openrouter/auto"
+        : process.env.OPENROUTER_MODEL || "openrouter/auto");
   const messageContent: OpenRouterChatContentPart[] = [
     {
       type: "text",
@@ -480,11 +539,11 @@ async function generateChatText(
     }
   ];
 
-  if (options?.includeImage !== false && profile.orderImageDataUrl) {
+  if (hasOrderImage) {
     messageContent.push({
       type: "image_url",
       imageUrl: {
-        url: profile.orderImageDataUrl,
+        url: orderImageDataUrl || "",
         detail: "high"
       }
     });
@@ -496,7 +555,7 @@ async function generateChatText(
       model,
       input: {
         prompt,
-        hasOrderImage: Boolean(options?.includeImage !== false && profile.orderImageDataUrl),
+        hasOrderImage,
         orderTextPreview: profile.orderText?.slice(0, 300) || undefined
       },
       metadata: {
@@ -772,15 +831,24 @@ export async function runDietPlannerAgent(
           });
 
           try {
-            const recognizedItems = await recognizeItems(profile, options);
+            const recognizedItems = hasOrderInput(profile)
+              ? await recognizeItems(profile, options)
+              : [];
 
-            options?.onProgress?.({
-              stage: "recognition_completed",
-              message: `已识别 ${recognizedItems.length} 个食材，开始生成菜谱。`,
-              detail: {
-                recognizedItems
-              }
-            });
+            if (hasOrderInput(profile)) {
+              options?.onProgress?.({
+                stage: "recognition_completed",
+                message: `已识别 ${recognizedItems.length} 个食材，开始生成菜谱。`,
+                detail: {
+                  recognizedItems
+                }
+              });
+            } else {
+              options?.onProgress?.({
+                stage: "recognition_completed",
+                message: "未提供购物清单，正在直接生成菜谱和建议采购清单。"
+              });
+            }
 
             const plan = await generateRecipes(profile, recognizedItems, options);
 

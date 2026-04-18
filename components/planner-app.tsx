@@ -5,6 +5,7 @@ import * as Sentry from "@sentry/nextjs";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import type {
   DietPlanResult,
+  GenerationScopeValue,
   OrderRecipeRequest,
   PlannerProfile,
   PreferenceValue,
@@ -112,6 +113,152 @@ const initialProfile: PlannerProfile = {
   notes: ""
 };
 
+const devOrderText = `鸡胸肉 2 盒
+鸡蛋 12 枚
+番茄 4 个
+西兰花 2 颗
+菠菜 1 把
+虾仁 300g
+北豆腐 2 盒
+土豆 3 个
+玉米 2 根
+无糖酸奶 4 杯`;
+
+const generationScopeOptions: Array<{
+  value: GenerationScopeValue;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "single-meal",
+    label: "生成一顿",
+    description: "输出 1 道适合当前食材和目标的菜。"
+  },
+  {
+    value: "full-day",
+    label: "生成一天",
+    description: "输出早餐、午餐、晚餐各 1 道，按顺序安排。"
+  }
+];
+
+const mealSlots = [
+  { label: "早餐", hour: 8, minute: 0, durationHours: 1 },
+  { label: "午餐", hour: 12, minute: 30, durationHours: 1 },
+  { label: "晚餐", hour: 19, minute: 0, durationHours: 1 }
+] as const;
+
+type CalendarExportTimes = {
+  singleMeal: string;
+  breakfast: string;
+  lunch: string;
+  dinner: string;
+};
+
+function padCalendarNumber(value: number) {
+  return String(value).padStart(2, "0");
+}
+
+function formatCalendarTimestamp(date: Date) {
+  return `${date.getUTCFullYear()}${padCalendarNumber(date.getUTCMonth() + 1)}${padCalendarNumber(
+    date.getUTCDate()
+  )}T${padCalendarNumber(date.getUTCHours())}${padCalendarNumber(
+    date.getUTCMinutes()
+  )}${padCalendarNumber(date.getUTCSeconds())}Z`;
+}
+
+function escapeCalendarText(value: string) {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/\n/g, "\\n")
+    .replace(/,/g, "\\,")
+    .replace(/;/g, "\\;");
+}
+
+function parseTimeValue(value: string, fallbackHour: number, fallbackMinute: number) {
+  const match = value.match(/^(\d{2}):(\d{2})$/);
+
+  if (!match) {
+    return { hour: fallbackHour, minute: fallbackMinute };
+  }
+
+  return {
+    hour: Number(match[1]),
+    minute: Number(match[2])
+  };
+}
+
+function buildCalendarFile(
+  profile: PlannerProfile,
+  result: DietPlanResult,
+  generationScope: GenerationScopeValue,
+  exportTimes: CalendarExportTimes
+) {
+  const createdAt = new Date();
+  const baseDate = new Date();
+  baseDate.setDate(baseDate.getDate() + 1);
+
+  const events = result.recipeSuggestions.map((recipe, index) => {
+    const startAt = new Date(baseDate);
+    const slot =
+      generationScope === "full-day"
+        ? mealSlots[index % mealSlots.length]
+        : { label: "单顿", hour: 19, minute: 0, durationHours: 1 };
+    const dayOffset =
+      generationScope === "full-day" ? Math.floor(index / mealSlots.length) : index;
+    const customTime =
+      generationScope === "full-day"
+        ? slot.label === "早餐"
+          ? parseTimeValue(exportTimes.breakfast, slot.hour, slot.minute)
+          : slot.label === "午餐"
+            ? parseTimeValue(exportTimes.lunch, slot.hour, slot.minute)
+            : parseTimeValue(exportTimes.dinner, slot.hour, slot.minute)
+        : parseTimeValue(exportTimes.singleMeal, slot.hour, slot.minute);
+
+    startAt.setDate(baseDate.getDate() + dayOffset);
+    startAt.setHours(customTime.hour, customTime.minute, 0, 0);
+
+    const endAt = new Date(startAt);
+    endAt.setHours(endAt.getHours() + slot.durationHours);
+
+    const description = [
+      recipe.summary,
+      "",
+      `适配原因：${recipe.fitReason}`,
+      "",
+      "用到的食材：",
+      ...recipe.ingredientsToUse.map((ingredient) => `- ${ingredient}`),
+      "",
+      "步骤：",
+      ...recipe.steps.map((step, stepIndex) => `${stepIndex + 1}. ${step}`)
+    ].join("\n");
+
+    const owner = profile.name.trim() || "diet-agent-user";
+
+    return [
+      "BEGIN:VEVENT",
+      `UID:${escapeCalendarText(`${owner}-${index + 1}-${startAt.getTime()}@diet-agent-shanghai`)}`,
+      `DTSTAMP:${formatCalendarTimestamp(createdAt)}`,
+      `DTSTART:${formatCalendarTimestamp(startAt)}`,
+      `DTEND:${formatCalendarTimestamp(endAt)}`,
+      `SUMMARY:${escapeCalendarText(`${slot.label}计划：${recipe.title}`)}`,
+      `DESCRIPTION:${escapeCalendarText(description)}`,
+      `LOCATION:${escapeCalendarText("家中厨房")}`,
+      "END:VEVENT"
+    ].join("\r\n");
+  });
+
+  return [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//Diet Agent Shanghai//Meal Plan Export//EN",
+    "CALSCALE:GREGORIAN",
+    "METHOD:PUBLISH",
+    `X-WR-CALNAME:${escapeCalendarText(result.planTitle)}`,
+    ...events,
+    "END:VCALENDAR"
+  ].join("\r\n");
+}
+
 function toggleItem<T extends string>(items: T[], target: T) {
   return items.includes(target)
     ? items.filter((item) => item !== target)
@@ -128,12 +275,23 @@ function toggleRequiredItem<T extends string>(items: T[], target: T) {
 
 export function PlannerApp({ userId }: { userId?: string | null }) {
   const hasClerk = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
+  const isDevelopment = process.env.NODE_ENV === "development";
   const [mounted, setMounted] = useState(false);
   const [profile, setProfile] = useState<PlannerProfile>(initialProfile);
   const [orderImageDataUrl, setOrderImageDataUrl] = useState("");
-  const [orderText, setOrderText] = useState("");
+  const [selectedFileName, setSelectedFileName] = useState("");
+  const [orderText, setOrderText] = useState(isDevelopment ? devOrderText : "");
+  const [generationScope, setGenerationScope] = useState<GenerationScopeValue>("single-meal");
+  const [calendarExportTimes, setCalendarExportTimes] = useState<CalendarExportTimes>({
+    singleMeal: "19:00",
+    breakfast: "08:00",
+    lunch: "12:30",
+    dinner: "19:00"
+  });
   const [result, setResult] = useState<DietPlanResult | null>(null);
   const [copiedRecipe, setCopiedRecipe] = useState<string | null>(null);
+  const [calendarExported, setCalendarExported] = useState(false);
+  const [showCalendarExportPanel, setShowCalendarExportPanel] = useState(false);
   const [loading, setLoading] = useState(false);
   const [progressStep, setProgressStep] = useState(0);
   const [progressMessage, setProgressMessage] = useState("");
@@ -305,6 +463,40 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
     }
   }
 
+  function exportCalendar(plan: DietPlanResult) {
+    try {
+      const icsContent = buildCalendarFile(profile, plan, generationScope, calendarExportTimes);
+      const blob = new Blob([icsContent], {
+        type: "text/calendar;charset=utf-8"
+      });
+      const url = window.URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      const safeTitle = plan.planTitle.replace(/[^\w\u4e00-\u9fa5-]+/g, "-");
+
+      anchor.href = url;
+      anchor.download = `${safeTitle || "diet-plan"}.ics`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      window.URL.revokeObjectURL(url);
+
+      setCalendarExported(true);
+      setShowCalendarExportPanel(false);
+      window.setTimeout(() => setCalendarExported(false), 1800);
+    } catch (error) {
+      captureClientException(
+        error instanceof Error ? error : new Error("导出日历失败"),
+        {
+          tags: {
+            area: "planner-app",
+            action: "export-calendar"
+          }
+        }
+      );
+      setError("导出日历失败，请稍后重试。");
+    }
+  }
+
   function updateProgress(payload: SseProgressPayload) {
     const stepIndex = generationSteps.findIndex((step) => step.stage === payload.stage);
 
@@ -382,6 +574,7 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
   async function handleFileChange(file: File | null) {
     if (!file) {
       setOrderImageDataUrl("");
+      setSelectedFileName("");
       return;
     }
 
@@ -394,6 +587,7 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
       });
 
       setOrderImageDataUrl(dataUrl);
+      setSelectedFileName(file.name);
     } catch (error) {
       captureClientException(
         error instanceof Error ? error : new Error("订单截图读取失败"),
@@ -422,14 +616,11 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
     setError(null);
 
     try {
-      if (!orderImageDataUrl && !orderText.trim()) {
-        throw new Error("请上传买菜 app 订单截图，或直接粘贴订单文字。");
-      }
-
       const payloadBody: OrderRecipeRequest = {
         ...profile,
         orderImageDataUrl,
-        orderText
+        orderText,
+        generationScope
       };
 
       const response = await fetch("/api/recommend/stream", {
@@ -500,12 +691,11 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
       <section className="workspace">
         <form className="panel form-panel" onSubmit={handleSubmit}>
           <div className="section-head">
-            <p className="section-kicker">Profile</p>
-            <h2>建立用户画像</h2>
-            <div className="section-actions">
-              {savedProfileMessage ? (
-                <p className="saved-profile-text">{savedProfileMessage}</p>
-              ) : null}
+            <div className="section-head-row">
+              <div>
+                <p className="section-kicker">Profile</p>
+                <h2>建立用户画像</h2>
+              </div>
               <button
                 type="button"
                 className="ghost-button"
@@ -514,11 +704,29 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
                 清空已记住画像
               </button>
             </div>
+            {savedProfileMessage ? (
+              <p className="saved-profile-text">{savedProfileMessage}</p>
+            ) : null}
           </div>
 
-          <label>
-            订单截图（可选）
+          <label className="upload-field">
+            <span className="upload-label">订单截图（可选）</span>
+            <span className="upload-dropzone">
+              <span className="upload-copy">
+                <strong>上传订单截图</strong>
+              <small>
+                  支持常见图片格式。有购物清单时会优先识别现有食材，没有也可以直接生成菜谱和采购建议。
+                </small>
+              </span>
+              <span className="upload-action">
+                {selectedFileName ? "重新选择图片" : "选择图片"}
+              </span>
+              <span className="upload-meta">
+                {selectedFileName || "还没有选择文件"}
+              </span>
+            </span>
             <input
+              className="upload-input"
               type="file"
               accept="image/*"
               onChange={(event) => {
@@ -540,7 +748,7 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
               rows={5}
               value={orderText}
               onChange={(event) => setOrderText(event.target.value)}
-              placeholder="可以直接粘贴订单商品名，例如：鸡胸肉 1kg、番茄、鸡蛋、菠菜、土豆、虾仁..."
+              placeholder="可以直接粘贴订单商品名；如果留空，系统会根据你的目标直接生成菜谱和建议采购清单。"
             />
           </label>
 
@@ -583,6 +791,26 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
           </div>
 
           <fieldset>
+            <legend>生成范围</legend>
+            <div className="chip-grid">
+              {generationScopeOptions.map((option) => (
+                <label className="chip" key={option.value}>
+                  <input
+                    type="radio"
+                    name="generation-scope"
+                    checked={generationScope === option.value}
+                    onChange={() => setGenerationScope(option.value)}
+                  />
+                  <span>
+                    {option.label}
+                    <small className="chip-hint">{option.description}</small>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+
+          <fieldset>
             <legend>目标（可多选）</legend>
             <div className="chip-grid">
               {goalOptions.map((option) => (
@@ -604,7 +832,7 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
           </fieldset>
 
           <div className="field-grid">
-            <label>
+            <label className="select-field">
               日常节奏
               <select
                 value={profile.schedule}
@@ -704,8 +932,13 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
                     }`}
                     key={step.title}
                   >
-                    <span>{index < progressStep ? "完成" : index === progressStep ? "处理中" : "等待"}</span>
-                    <div>
+                    <div className="progress-marker">
+                      <span className="progress-index">{String(index + 1).padStart(2, "0")}</span>
+                    </div>
+                    <div className="progress-content">
+                      <span className="progress-status">
+                        {index < progressStep ? "完成" : index === progressStep ? "处理中" : "等待"}
+                      </span>
                       <strong>{step.title}</strong>
                       <p>{step.description}</p>
                     </div>
@@ -721,7 +954,96 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
                   <h2>{result.planTitle}</h2>
                   <p>{result.positioning}</p>
                 </div>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() =>
+                    setShowCalendarExportPanel((current) => !current)
+                  }
+                >
+                  {calendarExported
+                    ? "已导出日历"
+                    : showCalendarExportPanel
+                      ? "收起导出设置"
+                      : "导出到日历"}
+                </button>
               </div>
+
+              {showCalendarExportPanel ? (
+                <section className="calendar-export-panel">
+                  <div className="calendar-export-head">
+                    <div>
+                      <p className="surface-kicker">Calendar Export</p>
+                      <h3>设置导出时间</h3>
+                    </div>
+                    <button
+                      type="button"
+                      className="copy-button"
+                      onClick={() => exportCalendar(result)}
+                    >
+                      确认导出
+                    </button>
+                  </div>
+                  {generationScope === "full-day" ? (
+                    <div className="field-grid">
+                      <label>
+                        早餐时间
+                        <input
+                          type="time"
+                          value={calendarExportTimes.breakfast}
+                          onChange={(event) =>
+                            setCalendarExportTimes((current) => ({
+                              ...current,
+                              breakfast: event.target.value
+                            }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        午餐时间
+                        <input
+                          type="time"
+                          value={calendarExportTimes.lunch}
+                          onChange={(event) =>
+                            setCalendarExportTimes((current) => ({
+                              ...current,
+                              lunch: event.target.value
+                            }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        晚餐时间
+                        <input
+                          type="time"
+                          value={calendarExportTimes.dinner}
+                          onChange={(event) =>
+                            setCalendarExportTimes((current) => ({
+                              ...current,
+                              dinner: event.target.value
+                            }))
+                          }
+                        />
+                      </label>
+                    </div>
+                  ) : (
+                    <label>
+                      单顿时间
+                      <input
+                        type="time"
+                        value={calendarExportTimes.singleMeal}
+                        onChange={(event) =>
+                          setCalendarExportTimes((current) => ({
+                            ...current,
+                            singleMeal: event.target.value
+                          }))
+                        }
+                      />
+                    </label>
+                  )}
+                  <p className="field-note">确认导出后，会按这里的时间写入 `.ics` 日历事件。</p>
+                </section>
+              ) : null}
 
               <div className="triple-grid">
                 <article className="info-block">
@@ -739,23 +1061,75 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
               </div>
 
               <div className="two-grid">
-                <section className="surface-block">
-                  <h3>识别到的食材</h3>
-                  {result.recognizedItems.map((item) => (
-                    <article className="list-item" key={item.name}>
-                      <h4>{item.name}</h4>
-                      <p>{item.evidence}</p>
-                      <small>识别置信度：{item.confidence}</small>
-                    </article>
-                  ))}
+                <section className="surface-block table-surface">
+                  <div className="surface-head">
+                    <div>
+                      <p className="surface-kicker">Detected Items</p>
+                      <h3>{result.recognizedItems.length ? "识别到的食材" : "现有食材"}</h3>
+                    </div>
+                    <span className="surface-pill">{result.recognizedItems.length} 项</span>
+                  </div>
+                  {result.recognizedItems.length ? (
+                    result.recognizedItems.map((item) => (
+                      <article className="table-row-card list-item" key={item.name}>
+                        <div className="table-row-main">
+                          <div>
+                            <h4>{item.name}</h4>
+                            <p>{item.evidence}</p>
+                          </div>
+                          <span className="metric-badge">置信度 {item.confidence}</span>
+                        </div>
+                      </article>
+                    ))
+                  ) : (
+                    <p className="empty-copy">
+                      这次没有提供购物清单，下面的菜谱会配套给出建议采购清单。
+                    </p>
+                  )}
                 </section>
 
-                <section className="surface-block">
-                  <h3>推荐菜谱</h3>
+                <section className="surface-block table-surface">
+                  <div className="surface-head">
+                    <div>
+                      <p className="surface-kicker">Shopping List</p>
+                      <h3>建议采购清单</h3>
+                    </div>
+                    <span className="surface-pill">{result.suggestedShoppingList.length} 项</span>
+                  </div>
+                  {result.suggestedShoppingList.length ? (
+                    result.suggestedShoppingList.map((item) => (
+                      <article className="table-row-card list-item" key={`${item.name}-${item.quantity}`}>
+                        <div className="table-row-main">
+                          <div>
+                            <h4>{item.name}</h4>
+                            <p>{item.reason}</p>
+                          </div>
+                          <span className="metric-badge">{item.quantity}</span>
+                        </div>
+                      </article>
+                    ))
+                  ) : (
+                    <p className="empty-copy">当前已有食材已经足够，暂时不需要额外采购。</p>
+                  )}
+                </section>
+              </div>
+
+              <div className="two-grid">
+                <section className="surface-block table-surface">
+                  <div className="surface-head">
+                    <div>
+                      <p className="surface-kicker">Recommendations</p>
+                      <h3>推荐菜谱</h3>
+                    </div>
+                    <span className="surface-pill">{result.recipeSuggestions.length} 道</span>
+                  </div>
                   {result.recipeSuggestions.map((recipe) => (
-                    <article className="list-item" key={recipe.title}>
+                    <article className="table-row-card list-item recipe-card" key={recipe.title}>
                       <div className="recipe-title-row">
-                        <h4>{recipe.title}</h4>
+                        <div>
+                          <h4>{recipe.title}</h4>
+                          <p className="recipe-summary">{recipe.summary}</p>
+                        </div>
                         <button
                           type="button"
                           className="copy-button"
@@ -764,14 +1138,13 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
                           {copiedRecipe === recipe.title ? "已复制" : "复制菜谱"}
                         </button>
                       </div>
-                      <p>{recipe.summary}</p>
-                      <small>{recipe.fitReason}</small>
-                      <ul>
+                      <p className="recipe-fit-reason">{recipe.fitReason}</p>
+                      <ul className="token-list">
                         {recipe.ingredientsToUse.map((ingredient) => (
                           <li key={`${recipe.title}-${ingredient}`}>{ingredient}</li>
                         ))}
                       </ul>
-                      <ul>
+                      <ul className="step-list">
                         {recipe.steps.map((step) => (
                           <li key={`${recipe.title}-${step}`}>{step}</li>
                         ))}
@@ -779,9 +1152,7 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
                     </article>
                   ))}
                 </section>
-              </div>
 
-              <div className="two-grid">
                 <section className="surface-block">
                   <h3>执行建议</h3>
                   <ul className="plain-list">
@@ -806,7 +1177,7 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
               <p className="section-kicker">Waiting</p>
               <h2>结果还没生成</h2>
               <p>
-                上传订单截图或粘贴订单文字后，服务端 agent 会先识别你买了哪些菜，再根据你的目标和限制动态推荐菜谱。
+                你可以上传订单截图、粘贴购物清单，或者直接留空让 agent 按你的目标生成菜谱和建议采购清单。
               </p>
             </div>
           )}

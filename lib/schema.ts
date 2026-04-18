@@ -31,11 +31,13 @@ export const goalValues = [
 ] as const;
 
 export const scheduleValues = ["busy", "balanced", "serious"] as const;
+export const generationScopeValues = ["single-meal", "full-day"] as const;
 
 export type PreferenceValue = (typeof preferenceValues)[number];
 export type ConditionValue = (typeof conditionValues)[number];
 export type GoalValue = (typeof goalValues)[number];
 export type ScheduleValue = (typeof scheduleValues)[number];
+export type GenerationScopeValue = (typeof generationScopeValues)[number];
 
 export type PlannerProfile = {
   name: string;
@@ -51,6 +53,7 @@ export type PlannerProfile = {
 export type OrderRecipeRequest = PlannerProfile & {
   orderImageDataUrl?: string;
   orderText?: string;
+  generationScope?: GenerationScopeValue;
 };
 
 export const plannerProfileSchema = z.object({
@@ -79,24 +82,25 @@ export const legacyPlannerProfileSchema = plannerProfileSchema
 
 const orderInputSchema = {
   orderImageDataUrl: z.string().optional(),
-  orderText: z.string().optional()
+  orderText: z.string().optional(),
+  generationScope: z.enum(generationScopeValues).optional()
 };
 
 export const orderRecipeRequestSchema = z.union([
   plannerProfileSchema.extend(orderInputSchema),
   legacyPlannerProfileSchema.and(z.object(orderInputSchema))
-]).refine(
-  (value) =>
-    Boolean(value.orderImageDataUrl?.trim()) || Boolean(value.orderText?.trim()),
-  {
-    message: "请上传订单截图，或粘贴买菜订单文字。"
-  }
-);
+]);
 
 export const recognizedItemSchema = z.object({
   name: z.string(),
   evidence: z.string(),
   confidence: z.string()
+});
+
+export const suggestedShoppingItemSchema = z.object({
+  name: z.string(),
+  quantity: z.string(),
+  reason: z.string()
 });
 
 export const dietPlanResultSchema = z.object({
@@ -106,6 +110,7 @@ export const dietPlanResultSchema = z.object({
   nutritionFocus: z.string(),
   executionStyle: z.string(),
   recognizedItems: z.array(recognizedItemSchema),
+  suggestedShoppingList: z.array(suggestedShoppingItemSchema),
   recipeSuggestions: z.array(
     z.object({
       title: z.string(),
@@ -121,3 +126,4 @@ export const dietPlanResultSchema = z.object({
 
 export type DietPlanResult = z.infer<typeof dietPlanResultSchema>;
 export type RecognizedItem = z.infer<typeof recognizedItemSchema>;
+export type SuggestedShoppingItem = z.infer<typeof suggestedShoppingItemSchema>;
