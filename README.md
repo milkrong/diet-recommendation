@@ -41,7 +41,8 @@ docker compose up -d --build
 
 - 模型默认使用 `OPENROUTER_MODEL=openrouter/auto`
 - 如果你想切换模型，可以在 `.env.local` 中覆盖 `OPENROUTER_MODEL`
-- 如果你想单独给截图识别指定模型，可以在 `.env.local` 里设置 `OPENROUTER_VISION_MODEL`
+- 如果你想让购物清单 / 食材提取单独使用更快的模型，可以设置 `OPENROUTER_RECOGNITION_MODEL`
+- 如果你想单独给购物截图识别指定模型，可以在 `.env.local` 里设置 `OPENROUTER_VISION_MODEL`
 - Langfuse 至少需要 `LANGFUSE_PUBLIC_KEY` 和 `LANGFUSE_SECRET_KEY`
 - 如果你用的是 Langfuse 自托管或美国区，请配置 `LANGFUSE_BASE_URL`
 - GlitchTip 建议同时配置 `GLITCHTIP_DSN` 和 `NEXT_PUBLIC_GLITCHTIP_DSN`，这样服务端和浏览器错误都能收集
