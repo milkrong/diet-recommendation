@@ -6,6 +6,7 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import type {
   DietPlanResult,
   GenerationScopeValue,
+  MealPlanCounts,
   OrderRecipeRequest,
   PlannerProfile,
   PreferenceValue,
@@ -13,7 +14,12 @@ import type {
   GoalValue,
   ScheduleValue
 } from "@/lib/schema";
-import { plannerProfileSchema } from "@/lib/schema";
+import {
+  defaultMealPlanCounts,
+  getMealPlanTotal,
+  normalizeMealPlanCounts,
+  plannerProfileSchema
+} from "@/lib/schema";
 
 function captureClientException(
   error: unknown,
@@ -125,27 +131,39 @@ const devOrderText = `鸡胸肉 2 盒
 无糖酸奶 4 杯`;
 
 const generationScopeOptions: Array<{
-  value: GenerationScopeValue;
+  counts: MealPlanCounts;
   label: string;
   description: string;
 }> = [
   {
-    value: "single-meal",
+    counts: { breakfast: 0, lunch: 0, dinner: 1 },
     label: "生成一顿",
-    description: "输出 1 道适合当前食材和目标的菜。"
+    description: "默认生成 1 顿晚餐，适合先快速试一版。"
   },
   {
-    value: "full-day",
+    counts: { breakfast: 1, lunch: 1, dinner: 1 },
     label: "生成一天",
     description: "输出早餐、午餐、晚餐各 1 道，按顺序安排。"
+  },
+  {
+    counts: { breakfast: 0, lunch: 2, dinner: 2 },
+    label: "两天午晚餐",
+    description: "适合备餐，输出 2 顿午餐和 2 顿晚餐。"
+  },
+  {
+    counts: { breakfast: 3, lunch: 3, dinner: 3 },
+    label: "三天全餐",
+    description: "一次生成 9 顿，菜品会更丰富但等待稍久。"
   }
 ];
 
 const mealSlots = [
-  { label: "早餐", hour: 8, minute: 0, durationHours: 1 },
-  { label: "午餐", hour: 12, minute: 30, durationHours: 1 },
-  { label: "晚餐", hour: 19, minute: 0, durationHours: 1 }
+  { key: "breakfast", label: "早餐", hour: 8, minute: 0, durationHours: 1 },
+  { key: "lunch", label: "午餐", hour: 12, minute: 30, durationHours: 1 },
+  { key: "dinner", label: "晚餐", hour: 19, minute: 0, durationHours: 1 }
 ] as const;
+
+const mealCountOptions = [0, 1, 2, 3, 4] as const;
 
 type CalendarExportTimes = {
   singleMeal: string;
@@ -190,31 +208,29 @@ function parseTimeValue(value: string, fallbackHour: number, fallbackMinute: num
 function buildCalendarFile(
   profile: PlannerProfile,
   result: DietPlanResult,
-  generationScope: GenerationScopeValue,
+  mealPlanCounts: MealPlanCounts,
   exportTimes: CalendarExportTimes
 ) {
   const createdAt = new Date();
   const baseDate = new Date();
   baseDate.setDate(baseDate.getDate() + 1);
+  const plannedSlots = buildPlannedMealSlots(mealPlanCounts);
 
   const events = result.recipeSuggestions.map((recipe, index) => {
     const startAt = new Date(baseDate);
-    const slot =
-      generationScope === "full-day"
-        ? mealSlots[index % mealSlots.length]
-        : { label: "单顿", hour: 19, minute: 0, durationHours: 1 };
-    const dayOffset =
-      generationScope === "full-day" ? Math.floor(index / mealSlots.length) : index;
+    const slot = plannedSlots[index] || {
+      ...mealSlots[2],
+      mealIndex: index + 1,
+      dayOffset: index
+    };
     const customTime =
-      generationScope === "full-day"
-        ? slot.label === "早餐"
-          ? parseTimeValue(exportTimes.breakfast, slot.hour, slot.minute)
-          : slot.label === "午餐"
-            ? parseTimeValue(exportTimes.lunch, slot.hour, slot.minute)
-            : parseTimeValue(exportTimes.dinner, slot.hour, slot.minute)
-        : parseTimeValue(exportTimes.singleMeal, slot.hour, slot.minute);
+      slot.key === "breakfast"
+        ? parseTimeValue(exportTimes.breakfast, slot.hour, slot.minute)
+        : slot.key === "lunch"
+          ? parseTimeValue(exportTimes.lunch, slot.hour, slot.minute)
+          : parseTimeValue(exportTimes.dinner, slot.hour, slot.minute);
 
-    startAt.setDate(baseDate.getDate() + dayOffset);
+    startAt.setDate(baseDate.getDate() + slot.dayOffset);
     startAt.setHours(customTime.hour, customTime.minute, 0, 0);
 
     const endAt = new Date(startAt);
@@ -240,7 +256,7 @@ function buildCalendarFile(
       `DTSTAMP:${formatCalendarTimestamp(createdAt)}`,
       `DTSTART:${formatCalendarTimestamp(startAt)}`,
       `DTEND:${formatCalendarTimestamp(endAt)}`,
-      `SUMMARY:${escapeCalendarText(`${slot.label}计划：${recipe.title}`)}`,
+      `SUMMARY:${escapeCalendarText(`${slot.label}第 ${slot.mealIndex} 顿：${recipe.title}`)}`,
       `DESCRIPTION:${escapeCalendarText(description)}`,
       `LOCATION:${escapeCalendarText("家中厨房")}`,
       "END:VEVENT"
@@ -257,6 +273,49 @@ function buildCalendarFile(
     ...events,
     "END:VCALENDAR"
   ].join("\r\n");
+}
+
+function buildPlannedMealSlots(counts: MealPlanCounts) {
+  const maxDays = Math.max(counts.breakfast, counts.lunch, counts.dinner);
+  const slots: Array<(typeof mealSlots)[number] & { mealIndex: number; dayOffset: number }> = [];
+
+  for (let dayOffset = 0; dayOffset < maxDays; dayOffset += 1) {
+    mealSlots.forEach((slot) => {
+      if (dayOffset < counts[slot.key]) {
+        slots.push({
+          ...slot,
+          mealIndex: dayOffset + 1,
+          dayOffset
+        });
+      }
+    });
+  }
+
+  return slots;
+}
+
+function getGenerationScopeFromCounts(counts: MealPlanCounts): GenerationScopeValue {
+  return counts.breakfast === 1 && counts.lunch === 1 && counts.dinner === 1
+    ? "full-day"
+    : "single-meal";
+}
+
+function formatMealPlanSummary(counts: MealPlanCounts) {
+  const parts = [
+    counts.breakfast ? `${counts.breakfast} 顿早餐` : "",
+    counts.lunch ? `${counts.lunch} 顿午餐` : "",
+    counts.dinner ? `${counts.dinner} 顿晚餐` : ""
+  ].filter(Boolean);
+
+  return parts.length ? parts.join(" + ") : "至少选择 1 顿饭";
+}
+
+function sameMealPlanCounts(left: MealPlanCounts, right: MealPlanCounts) {
+  return (
+    left.breakfast === right.breakfast &&
+    left.lunch === right.lunch &&
+    left.dinner === right.dinner
+  );
 }
 
 function toggleItem<T extends string>(items: T[], target: T) {
@@ -281,7 +340,8 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
   const [orderImageDataUrl, setOrderImageDataUrl] = useState("");
   const [selectedFileName, setSelectedFileName] = useState("");
   const [orderText, setOrderText] = useState(isDevelopment ? devOrderText : "");
-  const [generationScope, setGenerationScope] = useState<GenerationScopeValue>("single-meal");
+  const [mealPlanCounts, setMealPlanCounts] =
+    useState<MealPlanCounts>(defaultMealPlanCounts);
   const [calendarExportTimes, setCalendarExportTimes] = useState<CalendarExportTimes>({
     singleMeal: "19:00",
     breakfast: "08:00",
@@ -404,6 +464,21 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
     setSavedProfileMessage("已重置当前画像，稍后会自动同步到数据库。");
   }
 
+  function updateMealPlanCount(meal: keyof MealPlanCounts, nextValue: number) {
+    setMealPlanCounts((current) => {
+      const next = normalizeMealPlanCounts({
+        ...current,
+        [meal]: nextValue
+      });
+
+      if (getMealPlanTotal(next) > 12) {
+        return current;
+      }
+
+      return next;
+    });
+  }
+
   if (!mounted) {
     return (
       <main className="shell">
@@ -465,7 +540,7 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
 
   function exportCalendar(plan: DietPlanResult) {
     try {
-      const icsContent = buildCalendarFile(profile, plan, generationScope, calendarExportTimes);
+      const icsContent = buildCalendarFile(profile, plan, mealPlanCounts, calendarExportTimes);
       const blob = new Blob([icsContent], {
         type: "text/calendar;charset=utf-8"
       });
@@ -615,12 +690,15 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
     setProgressMessage("正在提交订单和用户画像。");
     setError(null);
 
+    const normalizedMealPlanCounts = normalizeMealPlanCounts(mealPlanCounts);
+
     try {
       const payloadBody: OrderRecipeRequest = {
         ...profile,
         orderImageDataUrl,
         orderText,
-        generationScope
+        generationScope: getGenerationScopeFromCounts(normalizedMealPlanCounts),
+        mealPlanCounts: normalizedMealPlanCounts
       };
 
       const response = await fetch("/api/recommend/stream", {
@@ -792,22 +870,49 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
 
           <fieldset>
             <legend>生成范围</legend>
-            <div className="chip-grid">
+            <div className="meal-plan-presets">
               {generationScopeOptions.map((option) => (
-                <label className="chip" key={option.value}>
-                  <input
-                    type="radio"
-                    name="generation-scope"
-                    checked={generationScope === option.value}
-                    onChange={() => setGenerationScope(option.value)}
-                  />
+                <button
+                  type="button"
+                  className={`meal-preset-button ${
+                    sameMealPlanCounts(mealPlanCounts, option.counts) ? "is-selected" : ""
+                  }`}
+                  key={option.label}
+                  onClick={() => setMealPlanCounts(option.counts)}
+                >
                   <span>
-                    {option.label}
-                    <small className="chip-hint">{option.description}</small>
+                    <strong>{option.label}</strong>
+                    <small>{option.description}</small>
                   </span>
+                </button>
+              ))}
+            </div>
+            <div className="meal-plan-grid">
+              {mealSlots.map((slot) => (
+                <label className="meal-count-card" key={slot.key}>
+                  <span>
+                    <strong>{slot.label}</strong>
+                    <small>生成 {mealPlanCounts[slot.key]} 顿</small>
+                  </span>
+                  <select
+                    value={mealPlanCounts[slot.key]}
+                    onChange={(event) =>
+                      updateMealPlanCount(slot.key, Number(event.target.value))
+                    }
+                  >
+                    {mealCountOptions.map((count) => (
+                      <option value={count} key={count}>
+                        {count} 顿
+                      </option>
+                    ))}
+                  </select>
                 </label>
               ))}
             </div>
+            <p className="field-note">
+              当前会生成 {getMealPlanTotal(mealPlanCounts)} 道菜谱：
+              {formatMealPlanSummary(mealPlanCounts)}。数量越多菜品越丰富，等待时间也会略长。
+            </p>
           </fieldset>
 
           <fieldset>
@@ -984,8 +1089,8 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
                       确认导出
                     </button>
                   </div>
-                  {generationScope === "full-day" ? (
-                    <div className="field-grid">
+                  <div className="field-grid">
+                    {mealPlanCounts.breakfast > 0 ? (
                       <label>
                         早餐时间
                         <input
@@ -999,6 +1104,8 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
                           }
                         />
                       </label>
+                    ) : null}
+                    {mealPlanCounts.lunch > 0 ? (
                       <label>
                         午餐时间
                         <input
@@ -1012,6 +1119,8 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
                           }
                         />
                       </label>
+                    ) : null}
+                    {mealPlanCounts.dinner > 0 ? (
                       <label>
                         晚餐时间
                         <input
@@ -1025,22 +1134,8 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
                           }
                         />
                       </label>
-                    </div>
-                  ) : (
-                    <label>
-                      单顿时间
-                      <input
-                        type="time"
-                        value={calendarExportTimes.singleMeal}
-                        onChange={(event) =>
-                          setCalendarExportTimes((current) => ({
-                            ...current,
-                            singleMeal: event.target.value
-                          }))
-                        }
-                      />
-                    </label>
-                  )}
+                    ) : null}
+                  </div>
                   <p className="field-note">确认导出后，会按这里的时间写入 `.ics` 日历事件。</p>
                 </section>
               ) : null}
@@ -1114,17 +1209,20 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
                 </section>
               </div>
 
-              <div className="two-grid">
-                <section className="surface-block table-surface">
-                  <div className="surface-head">
-                    <div>
-                      <p className="surface-kicker">Recommendations</p>
-                      <h3>推荐菜谱</h3>
-                    </div>
-                    <span className="surface-pill">{result.recipeSuggestions.length} 道</span>
+              <section className="surface-block table-surface recipe-carousel-section">
+                <div className="surface-head">
+                  <div>
+                    <p className="surface-kicker">Recommendations</p>
+                    <h3>推荐菜谱</h3>
                   </div>
-                  {result.recipeSuggestions.map((recipe) => (
-                    <article className="table-row-card list-item recipe-card" key={recipe.title}>
+                  <span className="surface-pill">{result.recipeSuggestions.length} 道</span>
+                </div>
+                <div className="recipe-carousel" aria-label="可左右滚动查看推荐菜谱">
+                  {result.recipeSuggestions.map((recipe, index) => (
+                    <article className="recipe-card" key={recipe.title}>
+                      <span className="recipe-card-index">
+                        {String(index + 1).padStart(2, "0")}
+                      </span>
                       <div className="recipe-title-row">
                         <div>
                           <h4>{recipe.title}</h4>
@@ -1151,8 +1249,11 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
                       </ul>
                     </article>
                   ))}
-                </section>
+                </div>
+                <p className="field-note">横向滑动可以查看全部菜谱，手机上也可以直接左右划。</p>
+              </section>
 
+              <div className="two-grid">
                 <section className="surface-block">
                   <h3>执行建议</h3>
                   <ul className="plain-list">

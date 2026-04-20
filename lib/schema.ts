@@ -38,6 +38,11 @@ export type ConditionValue = (typeof conditionValues)[number];
 export type GoalValue = (typeof goalValues)[number];
 export type ScheduleValue = (typeof scheduleValues)[number];
 export type GenerationScopeValue = (typeof generationScopeValues)[number];
+export type MealPlanCounts = {
+  breakfast: number;
+  lunch: number;
+  dinner: number;
+};
 
 export type PlannerProfile = {
   name: string;
@@ -54,7 +59,50 @@ export type OrderRecipeRequest = PlannerProfile & {
   orderImageDataUrl?: string;
   orderText?: string;
   generationScope?: GenerationScopeValue;
+  mealPlanCounts?: MealPlanCounts;
 };
+
+export const defaultMealPlanCounts: MealPlanCounts = {
+  breakfast: 0,
+  lunch: 0,
+  dinner: 1
+};
+
+export function getMealPlanTotal(counts: MealPlanCounts) {
+  return counts.breakfast + counts.lunch + counts.dinner;
+}
+
+export function normalizeMealPlanCounts(
+  mealPlanCounts?: Partial<MealPlanCounts>,
+  generationScope?: GenerationScopeValue
+): MealPlanCounts {
+  const counts = {
+    breakfast: Math.max(0, Math.min(4, Math.trunc(Number(mealPlanCounts?.breakfast ?? 0)))),
+    lunch: Math.max(0, Math.min(4, Math.trunc(Number(mealPlanCounts?.lunch ?? 0)))),
+    dinner: Math.max(0, Math.min(4, Math.trunc(Number(mealPlanCounts?.dinner ?? 0))))
+  };
+
+  if (getMealPlanTotal(counts) > 0) {
+    return counts;
+  }
+
+  return generationScope === "full-day"
+    ? { breakfast: 1, lunch: 1, dinner: 1 }
+    : defaultMealPlanCounts;
+}
+
+export const mealPlanCountsSchema = z
+  .object({
+    breakfast: z.coerce.number().int().min(0).max(4),
+    lunch: z.coerce.number().int().min(0).max(4),
+    dinner: z.coerce.number().int().min(0).max(4)
+  })
+  .refine((counts) => getMealPlanTotal(counts) >= 1, {
+    message: "至少需要选择 1 顿饭"
+  })
+  .refine((counts) => getMealPlanTotal(counts) <= 12, {
+    message: "一次最多生成 12 顿饭"
+  });
 
 export const plannerProfileSchema = z.object({
   name: z.string(),
@@ -83,7 +131,8 @@ export const legacyPlannerProfileSchema = plannerProfileSchema
 const orderInputSchema = {
   orderImageDataUrl: z.string().optional(),
   orderText: z.string().optional(),
-  generationScope: z.enum(generationScopeValues).optional()
+  generationScope: z.enum(generationScopeValues).optional(),
+  mealPlanCounts: mealPlanCountsSchema.optional()
 };
 
 export const orderRecipeRequestSchema = z.union([

@@ -1,8 +1,11 @@
 import {
   dietPlanResultSchema,
+  getMealPlanTotal,
+  normalizeMealPlanCounts,
   orderRecipeRequestSchema,
   recognizedItemSchema,
   type DietPlanResult,
+  type MealPlanCounts,
   type OrderRecipeRequest,
   type RecognizedItem
 } from "@/lib/schema";
@@ -166,6 +169,11 @@ const dietPlanJsonSchema = {
 } as const;
 
 function serializeProfileForTelemetry(profile: OrderRecipeRequest) {
+  const mealPlanCounts = normalizeMealPlanCounts(
+    profile.mealPlanCounts,
+    profile.generationScope
+  );
+
   return {
     name: profile.name || undefined,
     age: profile.age || undefined,
@@ -173,6 +181,8 @@ function serializeProfileForTelemetry(profile: OrderRecipeRequest) {
     schedule: profile.schedule,
     preferences: profile.preferences,
     conditions: profile.conditions,
+    mealPlanCounts,
+    mealPlanTotal: getMealPlanTotal(mealPlanCounts),
     trainingFrequency: profile.trainingFrequency || undefined,
     notesPreview: profile.notes ? profile.notes.slice(0, 200) : undefined,
     orderTextPreview: profile.orderText ? profile.orderText.slice(0, 300) : undefined,
@@ -283,6 +293,11 @@ function createOpenRouterClient() {
 }
 
 function buildProfileText(profile: OrderRecipeRequest) {
+  const mealPlanCounts = normalizeMealPlanCounts(
+    profile.mealPlanCounts,
+    profile.generationScope
+  );
+
   return JSON.stringify(
     {
       name: profile.name,
@@ -292,6 +307,9 @@ function buildProfileText(profile: OrderRecipeRequest) {
       preferences: profile.preferences,
       conditions: profile.conditions,
       generationScope: profile.generationScope || "single-meal",
+      mealPlanCounts,
+      mealPlanTotal: getMealPlanTotal(mealPlanCounts),
+      mealPlanSequence: buildMealPlanSequence(mealPlanCounts),
       trainingFrequency: profile.trainingFrequency,
       notes: profile.notes
     },
@@ -334,6 +352,37 @@ function hasOrderInput(profile: OrderRecipeRequest) {
   return Boolean(profile.orderImageDataUrl?.trim() || profile.orderText?.trim());
 }
 
+function buildMealPlanSequence(counts: MealPlanCounts) {
+  const maxDays = Math.max(counts.breakfast, counts.lunch, counts.dinner);
+  const sequence: string[] = [];
+
+  for (let index = 0; index < maxDays; index += 1) {
+    if (index < counts.breakfast) {
+      sequence.push(`早餐第 ${index + 1} 顿`);
+    }
+
+    if (index < counts.lunch) {
+      sequence.push(`午餐第 ${index + 1} 顿`);
+    }
+
+    if (index < counts.dinner) {
+      sequence.push(`晚餐第 ${index + 1} 顿`);
+    }
+  }
+
+  return sequence;
+}
+
+function describeMealPlan(counts: MealPlanCounts) {
+  return [
+    counts.breakfast ? `${counts.breakfast} 顿早餐` : "",
+    counts.lunch ? `${counts.lunch} 顿午餐` : "",
+    counts.dinner ? `${counts.dinner} 顿晚餐` : ""
+  ]
+    .filter(Boolean)
+    .join(" + ");
+}
+
 function buildRecipePrompt(profile: OrderRecipeRequest, recognizedItems: RecognizedItem[]) {
   const profileContext = buildProfileContext(profile);
   const recipeContext = buildRecipeContext({
@@ -341,16 +390,15 @@ function buildRecipePrompt(profile: OrderRecipeRequest, recognizedItems: Recogni
     trainingFrequency: profile.trainingFrequency,
     notes: profile.notes
   });
-  const generationScope = profile.generationScope || "single-meal";
+  const mealPlanCounts = normalizeMealPlanCounts(
+    profile.mealPlanCounts,
+    profile.generationScope
+  );
+  const mealPlanSequence = buildMealPlanSequence(mealPlanCounts);
+  const mealPlanTotal = getMealPlanTotal(mealPlanCounts);
   const hasRecognizedItems = recognizedItems.length > 0;
-  const recipeCountRule =
-    generationScope === "full-day"
-      ? "recipeSuggestions 必须严格给出 3 道菜，并且顺序必须是早餐、午餐、晚餐。"
-      : "recipeSuggestions 必须严格给出 1 道菜，表示这一顿最适合做的主推荐。";
-  const scopeRule =
-    generationScope === "full-day"
-      ? "用户这次要的是一天计划，请按早餐、午餐、晚餐三个时段安排，顺序不能错。"
-      : "用户这次只要一顿饭，不要扩展成一天计划。";
+  const recipeCountRule = `recipeSuggestions 必须严格给出 ${mealPlanTotal} 道菜，顺序必须严格对应：${mealPlanSequence.join("、")}。`;
+  const scopeRule = `用户这次要的是 ${describeMealPlan(mealPlanCounts)}，不要额外扩展或减少餐次。`;
   const sourceRule = hasRecognizedItems
     ? "本次已经提供了购物清单，请优先围绕现有食材做推荐。"
     : "本次没有提供购物清单，请直接生成菜谱，并同时补出建议采购清单。";
@@ -418,7 +466,8 @@ JSON 必须符合下面的结构要求：
 - ${recipeCountRule}
 - ${ingredientRule}
 - 菜谱风格优先家常、好执行、符合用户多选目标。
-- 如果是一天计划，summary 和 fitReason 中要明确这道菜对应早餐、午餐还是晚餐。
+- 每道菜的 summary 和 fitReason 中都要明确它对应 ${mealPlanSequence.join("、")} 中的哪一顿。
+- 多顿计划要尽量避免菜名和主要蛋白完全重复，让菜品更丰富；可以复用部分基础食材，但烹饪方式要有变化。
 - 所有内容使用简体中文。
   `.trim();
 }

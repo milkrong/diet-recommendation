@@ -305,6 +305,77 @@ fieldset {
   line-height: 1.45;
 }
 
+.meal-plan-presets {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.meal-preset-button {
+  display: grid;
+  gap: 6px;
+  min-height: 88px;
+  padding: 14px;
+  border: 1px solid rgba(73, 56, 39, 0.12);
+  border-radius: var(--radius-sm);
+  background:
+    radial-gradient(circle at right top, rgba(133, 82, 58, 0.08), transparent 42%),
+    rgba(255, 255, 255, 0.7);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.meal-preset-button:hover,
+.meal-preset-button.is-selected {
+  transform: translateY(-1px);
+  border-color: rgba(133, 82, 58, 0.36);
+  background:
+    radial-gradient(circle at right top, rgba(133, 82, 58, 0.18), transparent 44%),
+    rgba(255, 250, 244, 0.94);
+}
+
+.meal-preset-button strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.meal-preset-button small {
+  display: block;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.meal-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.meal-count-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(73, 56, 39, 0.1);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.meal-count-card strong,
+.meal-count-card small {
+  display: block;
+}
+
+.meal-count-card small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
 .submit-button {
   border: 0;
   border-radius: 999px;
@@ -605,6 +676,67 @@ fieldset {
 
 .recipe-title-row h4 {
   margin: 0;
+}
+
+.recipe-carousel-section {
+  overflow: hidden;
+}
+
+.recipe-carousel {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(310px, 42%);
+  gap: 16px;
+  margin: 0 -20px;
+  padding: 2px 20px 18px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-padding-inline: 20px;
+  scroll-snap-type: x mandatory;
+  scrollbar-color: rgba(133, 82, 58, 0.38) rgba(73, 56, 39, 0.08);
+  scrollbar-width: thin;
+}
+
+.recipe-carousel::-webkit-scrollbar {
+  height: 10px;
+}
+
+.recipe-carousel::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: rgba(73, 56, 39, 0.08);
+}
+
+.recipe-carousel::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(133, 82, 58, 0.38);
+}
+
+.recipe-card {
+  position: relative;
+  min-height: 100%;
+  padding: 18px;
+  border: 1px solid rgba(73, 56, 39, 0.1);
+  border-radius: var(--radius-md);
+  background:
+    radial-gradient(circle at right top, rgba(133, 82, 58, 0.12), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(250, 244, 238, 0.86));
+  box-shadow: 0 14px 34px rgba(34, 24, 16, 0.07);
+  scroll-snap-align: start;
+}
+
+.recipe-card-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 12px;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  background: rgba(133, 82, 58, 0.1);
+  color: var(--accent-strong);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
 }
 
 .recipe-summary {
@@ -911,6 +1043,7 @@ fieldset {
   .field-grid,
   .triple-grid,
   .two-grid,
+  .meal-plan-grid,
   .auth-shell {
     grid-template-columns: 1fr;
   }
@@ -933,6 +1066,10 @@ fieldset {
   .calendar-export-head {
     flex-direction: column;
   }
+
+  .recipe-carousel {
+    grid-auto-columns: minmax(280px, 72%);
+  }
 }
 
 @media (max-width: 640px) {
@@ -940,6 +1077,10 @@ fieldset {
   .section-actions {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .meal-plan-presets {
+    grid-template-columns: 1fr;
   }
 
   .shell {
@@ -955,5 +1096,9 @@ fieldset {
 
   .hero h1 {
     font-size: 2.4rem;
+  }
+
+  .recipe-carousel {
+    grid-auto-columns: minmax(260px, 88%);
   }
 }
