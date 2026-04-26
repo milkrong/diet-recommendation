@@ -40,6 +40,13 @@ function captureClientException(
       scope.setExtra(key, value);
     });
 
+    Sentry.logger.error(normalizedError.message, {
+      service: "diet-recommendation",
+      area: context?.tags?.area || "client",
+      action: context?.tags?.action,
+      error_name: normalizedError.name
+    });
+
     Sentry.captureException(normalizedError);
   });
 }
@@ -352,6 +359,8 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
   const [copiedRecipe, setCopiedRecipe] = useState<string | null>(null);
   const [calendarExported, setCalendarExported] = useState(false);
   const [showCalendarExportPanel, setShowCalendarExportPanel] = useState(false);
+  const [showRecognizedItems, setShowRecognizedItems] = useState(false);
+  const [showShoppingList, setShowShoppingList] = useState(false);
   const [loading, setLoading] = useState(false);
   const [progressStep, setProgressStep] = useState(0);
   const [progressMessage, setProgressMessage] = useState("");
@@ -596,6 +605,8 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
 
     if (eventType === "complete") {
       setProgressStep(generationSteps.length - 1);
+      setShowRecognizedItems(false);
+      setShowShoppingList(false);
       setResult(parsed as DietPlanResult);
       return;
     }
@@ -686,11 +697,24 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
     event.preventDefault();
     setLoading(true);
     setResult(null);
+    setShowRecognizedItems(false);
+    setShowShoppingList(false);
     setProgressStep(0);
     setProgressMessage("正在提交订单和用户画像。");
     setError(null);
 
     const normalizedMealPlanCounts = normalizeMealPlanCounts(mealPlanCounts);
+    Sentry.logger.info("Planner submit started", {
+      service: "diet-recommendation",
+      area: "planner-app",
+      action: "submit-plan-request",
+      has_order_image: Boolean(orderImageDataUrl),
+      has_order_text: Boolean(orderText.trim()),
+      goals_count: profile.goals.length,
+      preferences_count: profile.preferences.length,
+      conditions_count: profile.conditions.length,
+      meal_plan_total: getMealPlanTotal(normalizedMealPlanCounts)
+    });
 
     try {
       const payloadBody: OrderRecipeRequest = {
@@ -710,6 +734,11 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
       });
 
       await consumeSseResponse(response);
+      Sentry.logger.info("Planner submit completed", {
+        service: "diet-recommendation",
+        area: "planner-app",
+        action: "submit-plan-request"
+      });
     } catch (submitError) {
       captureClientException(
         submitError instanceof Error
@@ -1162,25 +1191,37 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
                       <p className="surface-kicker">Detected Items</p>
                       <h3>{result.recognizedItems.length ? "识别到的食材" : "现有食材"}</h3>
                     </div>
-                    <span className="surface-pill">{result.recognizedItems.length} 项</span>
+                    <div className="surface-head-actions">
+                      <span className="surface-pill">{result.recognizedItems.length} 项</span>
+                      <button
+                        type="button"
+                        className="copy-button"
+                        aria-expanded={showRecognizedItems}
+                        onClick={() => setShowRecognizedItems((current) => !current)}
+                      >
+                        {showRecognizedItems ? "收起" : "展开"}
+                      </button>
+                    </div>
                   </div>
-                  {result.recognizedItems.length ? (
-                    result.recognizedItems.map((item) => (
-                      <article className="table-row-card list-item" key={item.name}>
-                        <div className="table-row-main">
-                          <div>
-                            <h4>{item.name}</h4>
-                            <p>{item.evidence}</p>
+                  {showRecognizedItems ? (
+                    result.recognizedItems.length ? (
+                      result.recognizedItems.map((item) => (
+                        <article className="table-row-card list-item" key={item.name}>
+                          <div className="table-row-main">
+                            <div>
+                              <h4>{item.name}</h4>
+                              <p>{item.evidence}</p>
+                            </div>
+                            <span className="metric-badge">置信度 {item.confidence}</span>
                           </div>
-                          <span className="metric-badge">置信度 {item.confidence}</span>
-                        </div>
-                      </article>
-                    ))
-                  ) : (
-                    <p className="empty-copy">
-                      这次没有提供购物清单，下面的菜谱会配套给出建议采购清单。
-                    </p>
-                  )}
+                        </article>
+                      ))
+                    ) : (
+                      <p className="empty-copy">
+                        这次没有提供购物清单，下面的菜谱会配套给出建议采购清单。
+                      </p>
+                    )
+                  ) : null}
                 </section>
 
                 <section className="surface-block table-surface">
@@ -1189,23 +1230,35 @@ export function PlannerApp({ userId }: { userId?: string | null }) {
                       <p className="surface-kicker">Shopping List</p>
                       <h3>建议采购清单</h3>
                     </div>
-                    <span className="surface-pill">{result.suggestedShoppingList.length} 项</span>
+                    <div className="surface-head-actions">
+                      <span className="surface-pill">{result.suggestedShoppingList.length} 项</span>
+                      <button
+                        type="button"
+                        className="copy-button"
+                        aria-expanded={showShoppingList}
+                        onClick={() => setShowShoppingList((current) => !current)}
+                      >
+                        {showShoppingList ? "收起" : "展开"}
+                      </button>
+                    </div>
                   </div>
-                  {result.suggestedShoppingList.length ? (
-                    result.suggestedShoppingList.map((item) => (
-                      <article className="table-row-card list-item" key={`${item.name}-${item.quantity}`}>
-                        <div className="table-row-main">
-                          <div>
-                            <h4>{item.name}</h4>
-                            <p>{item.reason}</p>
+                  {showShoppingList ? (
+                    result.suggestedShoppingList.length ? (
+                      result.suggestedShoppingList.map((item) => (
+                        <article className="table-row-card list-item" key={`${item.name}-${item.quantity}`}>
+                          <div className="table-row-main">
+                            <div>
+                              <h4>{item.name}</h4>
+                              <p>{item.reason}</p>
+                            </div>
+                            <span className="metric-badge">{item.quantity}</span>
                           </div>
-                          <span className="metric-badge">{item.quantity}</span>
-                        </div>
-                      </article>
-                    ))
-                  ) : (
-                    <p className="empty-copy">当前已有食材已经足够，暂时不需要额外采购。</p>
-                  )}
+                        </article>
+                      ))
+                    ) : (
+                      <p className="empty-copy">当前已有食材已经足够，暂时不需要额外采购。</p>
+                    )
+                  ) : null}
                 </section>
               </div>
 

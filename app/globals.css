@@ -596,6 +596,14 @@ fieldset {
   margin-bottom: 16px;
 }
 
+.surface-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .surface-kicker {
   margin: 0 0 6px;
   letter-spacing: 0.12em;
@@ -1065,6 +1073,10 @@ fieldset {
   .recipe-title-row,
   .calendar-export-head {
     flex-direction: column;
+  }
+
+  .surface-head-actions {
+    justify-content: flex-start;
   }
 
   .recipe-carousel {

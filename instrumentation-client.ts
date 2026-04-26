@@ -1,22 +1,25 @@
 import * as Sentry from "@sentry/nextjs";
 import {
-  getClientGlitchTipDsn,
+  getClientSentryDsn,
   getObservabilityEnvironment
 } from "@/lib/observability/config";
 
-const dsn = getClientGlitchTipDsn();
+const dsn = getClientSentryDsn();
 
 if (dsn) {
   Sentry.init({
     dsn,
     environment: getObservabilityEnvironment(),
     release:
-      process.env.NEXT_PUBLIC_GLITCHTIP_RELEASE ||
+      process.env.NEXT_PUBLIC_SENTRY_RELEASE ||
       process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA,
-    sampleRate: Number(process.env.NEXT_PUBLIC_GLITCHTIP_SAMPLE_RATE || "1"),
+    sampleRate: Number(process.env.NEXT_PUBLIC_SENTRY_SAMPLE_RATE || "1"),
     tracesSampleRate: Number(
-      process.env.NEXT_PUBLIC_GLITCHTIP_TRACES_SAMPLE_RATE || "0"
+      process.env.NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE || "0"
     ),
+    enableLogs: true,
     sendDefaultPii: false
   });
 }
+
+export const onRouterTransitionStart = Sentry.captureRouterTransitionStart;

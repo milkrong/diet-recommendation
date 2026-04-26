@@ -9,13 +9,8 @@ import {
   type OrderRecipeRequest,
   type RecognizedItem
 } from "@/lib/schema";
-import { captureException } from "@/lib/observability/sentry";
-import {
-  getActiveTraceId,
-  propagateAttributes,
-  startActiveObservation,
-  startObservation
-} from "@langfuse/tracing";
+import { captureException, logEvent } from "@/lib/observability/sentry";
+import * as Sentry from "@sentry/nextjs";
 import { extractJsonObject } from "@/lib/openrouter-json";
 import { buildProfileContext, buildRecipeContext } from "@/lib/openrouter-tools";
 import { OpenRouter } from "@openrouter/sdk";
@@ -224,6 +219,35 @@ function truncateForDebug(value: unknown, maxLength = 1500) {
   } catch {
     return String(value);
   }
+}
+
+function stringifyTelemetryValue(value: unknown, maxLength = 1500) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+
+  return truncateForDebug(value, maxLength);
+}
+
+function setSpanAttributes(
+  span: Sentry.Span,
+  attributes: Record<string, unknown>
+) {
+  Object.entries(attributes).forEach(([key, value]) => {
+    const serialized = stringifyTelemetryValue(value);
+
+    if (serialized !== undefined) {
+      span.setAttribute(key, serialized);
+    }
+  });
 }
 
 function summarizeModelResponse(response: unknown) {
@@ -598,84 +622,104 @@ async function generateChatText(
     });
   }
 
-  const generation = startObservation(
-    options?.observationName || "openrouter-structured-generation",
+  logEvent("info", "OpenRouter model call started", {
+    area: "diet-agent",
+    stage: options?.stage || "recognition",
+    model,
+    has_order_image: hasOrderImage,
+    response_schema: options?.responseSchema?.name || "json_object"
+  });
+
+  return Sentry.startSpan(
     {
-      model,
-      input: {
-        prompt,
-        hasOrderImage,
-        orderTextPreview: profile.orderText?.slice(0, 300) || undefined
-      },
-      metadata: {
-        feature: "diet-recommendation",
-        stage: options?.stage || "recognition"
+      name: options?.observationName || "openrouter-structured-generation",
+      op: "ai.chat",
+      attributes: {
+        "ai.system": "openrouter",
+        "ai.model": model,
+        "diet.feature": "diet-recommendation",
+        "diet.stage": options?.stage || "recognition",
+        "diet.has_order_image": hasOrderImage,
+        "diet.prompt_preview": prompt.slice(0, 600),
+        "diet.order_text_preview": profile.orderText?.slice(0, 300) || ""
       }
     },
-    { asType: "generation" }
-  );
-
-  try {
-    const response = await client.chat.send({
-      httpReferer: process.env.OPENROUTER_APP_URL,
-      appTitle: process.env.OPENROUTER_APP_NAME || "Diet Agent Shanghai",
-      chatGenerationParams: {
-        model,
-        messages: [
-          {
-            role: "user",
-            content: messageContent
+    async (span) => {
+      try {
+        const response = await client.chat.send({
+          httpReferer: process.env.OPENROUTER_APP_URL,
+          appTitle: process.env.OPENROUTER_APP_NAME || "Diet Agent Shanghai",
+          chatGenerationParams: {
+            model,
+            messages: [
+              {
+                role: "user",
+                content: messageContent
+              }
+            ],
+            responseFormat: options?.responseSchema
+              ? {
+                  type: "json_schema",
+                  jsonSchema: options.responseSchema
+                }
+              : {
+                  type: "json_object"
+                },
+            plugins: [
+              {
+                id: "response-healing",
+                enabled: true
+              }
+            ]
           }
-        ],
-        responseFormat: options?.responseSchema
-          ? {
-              type: "json_schema",
-              jsonSchema: options.responseSchema
-            }
-          : {
-              type: "json_object"
-            },
-        plugins: [
-          {
-            id: "response-healing",
-            enabled: true
-          }
-        ]
+        });
+
+        const assistantText = extractAssistantText(response);
+        setSpanAttributes(span, {
+          "ai.response.preview": assistantText.slice(0, 600),
+          "ai.usage": extractUsageDetails(response)
+        });
+        logEvent("info", "OpenRouter model call completed", {
+          area: "diet-agent",
+          stage: options?.stage || "recognition",
+          model,
+          response_length: assistantText.length,
+          usage: extractUsageDetails(response)
+        });
+
+        return assistantText;
+      } catch (error) {
+        const debugPayload =
+          error instanceof ModelResponseParseError ? error.debugPayload : undefined;
+        const message =
+          error instanceof Error ? error.message : "订单识别调用失败";
+
+        span.setStatus({ code: 2, message });
+        setSpanAttributes(span, {
+          "ai.error": message,
+          "ai.debug_payload": debugPayload
+        });
+        logEvent("error", "OpenRouter model call failed", {
+          area: "diet-agent",
+          stage: options?.stage || "recognition",
+          model,
+          error_name: error instanceof Error ? error.name : "UnknownError",
+          error_message: message,
+          has_debug_payload: Boolean(debugPayload)
+        });
+
+        if (debugPayload) {
+          console.error("[diet-agent] unparseable model response", {
+            stage: options?.stage || "recognition",
+            observationName: options?.observationName || "openrouter-structured-generation",
+            debugPayload
+          });
+        }
+
+        throw error;
       }
-    });
-
-    const assistantText = extractAssistantText(response);
-    generation.update({
-      output: assistantText,
-      usageDetails: extractUsageDetails(response)
-    });
-
-    return assistantText;
-  } catch (error) {
-    const debugPayload =
-      error instanceof ModelResponseParseError ? error.debugPayload : undefined;
-
-    generation.update({
-      level: "ERROR",
-      statusMessage: error instanceof Error ? error.message : "订单识别调用失败",
-      output: {
-        error: error instanceof Error ? error.message : String(error),
-        ...(debugPayload ? { debugPayload } : {})
-      }
-    });
-
-    if (debugPayload) {
-      console.error("[diet-agent] unparseable model response", {
-        stage: options?.stage || "recognition",
-        observationName: options?.observationName || "openrouter-structured-generation",
-        debugPayload
-      });
     }
-
-    throw error;
-  } finally {
-    generation.end();
-  }
+  );
 }
 
 async function repairJson<T>(
@@ -688,71 +732,79 @@ async function repairJson<T>(
     stage: "repair_started",
     message: "模型返回格式不稳定，正在自动修复 JSON。"
   });
+  logEvent("warn", "JSON repair started", {
+    area: "diet-agent",
+    stage: "repair",
+    error_name: error instanceof Error ? error.name : "UnknownError",
+    error_message: error instanceof Error ? error.message : String(error),
+    raw_text_length: rawText.length
+  });
 
-  const repairObservation = startObservation(
-    "repair-invalid-json",
+  return Sentry.startSpan(
     {
-      input: {
-        rawTextPreview: rawText.slice(0, 600),
-        errorMessage: error instanceof Error ? error.message : String(error)
-      },
-      metadata: {
-        stage: "repair"
+      name: "repair-invalid-json",
+      op: "ai.repair",
+      attributes: {
+        "diet.stage": "repair",
+        "diet.raw_text_preview": rawText.slice(0, 600),
+        "diet.parse_error": error instanceof Error ? error.message : String(error)
+      }
+    },
+    async (span) => {
+      try {
+        const repairedText = await generateChatText(
+          {
+            name: "",
+            age: "",
+            goals: ["maintain"],
+            schedule: "balanced",
+            preferences: [],
+            conditions: [],
+            trainingFrequency: "",
+            notes: "",
+            orderText: "",
+            orderImageDataUrl: ""
+          },
+          buildRepairPrompt(rawText, error),
+          {
+            observationName: "repair-invalid-json-model-call",
+            stage: "repair",
+            includeImage: false,
+            responseSchema: {
+              name: "json_repair_result",
+              strict: true,
+              schema: {
+                type: "object"
+              }
+            }
+          }
+        );
+        const repaired = parseJsonWithSchema(repairedText, schema);
+
+        span.setAttribute("diet.repaired", true);
+        logEvent("info", "JSON repair completed", {
+          area: "diet-agent",
+          stage: "repair",
+          repaired_text_length: repairedText.length
+        });
+        return repaired;
+      } catch (repairError) {
+        const message =
+          repairError instanceof Error ? repairError.message : "JSON 修复失败";
+
+        span.setStatus({ code: 2, message });
+        span.setAttribute("diet.repaired", false);
+        span.setAttribute("diet.error", message);
+        logEvent("error", "JSON repair failed", {
+          area: "diet-agent",
+          stage: "repair",
+          error_name: repairError instanceof Error ? repairError.name : "UnknownError",
+          error_message: message
+        });
+        throw repairError;
       }
     }
   );
-
-  try {
-    const repairedText = await generateChatText(
-      {
-        name: "",
-        age: "",
-        goals: ["maintain"],
-        schedule: "balanced",
-        preferences: [],
-        conditions: [],
-        trainingFrequency: "",
-        notes: "",
-        orderText: "",
-        orderImageDataUrl: ""
-      },
-      buildRepairPrompt(rawText, error),
-      {
-        observationName: "repair-invalid-json-model-call",
-        stage: "repair",
-        includeImage: false,
-        responseSchema: {
-          name: "json_repair_result",
-          strict: true,
-          schema: {
-            type: "object"
-          }
-        }
-      }
-    );
-    const repaired = parseJsonWithSchema(repairedText, schema);
-
-    repairObservation.update({
-      output: {
-        repaired: true
-      }
-    });
-
-    return repaired;
-  } catch (repairError) {
-    repairObservation.update({
-      level: "ERROR",
-      statusMessage:
-        repairError instanceof Error ? repairError.message : "JSON 修复失败",
-      output: {
-        repaired: false,
-        error: repairError instanceof Error ? repairError.message : String(repairError)
-      }
-    });
-    throw repairError;
-  } finally {
-    repairObservation.end();
-  }
 }
 
 async function recognizeItems(profile: OrderRecipeRequest, options?: DietAgentOptions) {
@@ -761,6 +813,12 @@ async function recognizeItems(profile: OrderRecipeRequest, options?: DietAgentOp
     message: profile.orderImageDataUrl
       ? "正在识别订单截图中的食材。"
       : "正在解析订单文字中的食材。"
+  });
+  logEvent("info", "Ingredient recognition started", {
+    area: "diet-agent",
+    stage: "recognition",
+    has_order_image: Boolean(profile.orderImageDataUrl),
+    has_order_text: Boolean(profile.orderText?.trim())
   });
 
   const rawText = await generateChatText(profile, buildRecognitionPrompt(profile), {
@@ -771,11 +829,28 @@ async function recognizeItems(profile: OrderRecipeRequest, options?: DietAgentOp
   });
 
   try {
-    return parseJsonWithSchema(rawText, recognizedItemsResultSchema).recognizedItems;
+    const recognizedItems =
+      parseJsonWithSchema(rawText, recognizedItemsResultSchema).recognizedItems;
+
+    logEvent("info", "Ingredient recognition completed", {
+      area: "diet-agent",
+      stage: "recognition",
+      recognized_count: recognizedItems.length
+    });
+
+    return recognizedItems;
   } catch (error) {
-    return (
+    const recognizedItems = (
       await repairJson(rawText, error, recognizedItemsResultSchema, options)
     ).recognizedItems;
+
+    logEvent("info", "Ingredient recognition completed after repair", {
+      area: "diet-agent",
+      stage: "recognition",
+      recognized_count: recognizedItems.length
+    });
+
+    return recognizedItems;
   }
 }
 
@@ -791,65 +866,77 @@ async function generateRecipes(
       recognizedCount: recognizedItems.length
     }
   });
+  logEvent("info", "Recipe generation started", {
+    area: "diet-agent",
+    stage: "recipe",
+    recognized_count: recognizedItems.length,
+    meal_plan_total: getMealPlanTotal(
+      normalizeMealPlanCounts(profile.mealPlanCounts, profile.generationScope)
+    )
+  });
 
-  const recipeGeneration = startObservation(
-    "generate-recipe-plan",
+  return Sentry.startSpan(
     {
-      model: process.env.OPENROUTER_MODEL || "openrouter/auto",
-      input: {
-        profile: serializeProfileForTelemetry(profile),
-        recognizedItems
-      },
-      metadata: {
-        recognizedCount: recognizedItems.length,
-        stage: "recipe"
+      name: "generate-recipe-plan",
+      op: "ai.workflow",
+      attributes: {
+        "ai.model": process.env.OPENROUTER_MODEL || "openrouter/auto",
+        "diet.stage": "recipe",
+        "diet.profile": truncateForDebug(serializeProfileForTelemetry(profile)),
+        "diet.recognized_count": recognizedItems.length,
+        "diet.recognized_items": truncateForDebug(recognizedItems)
       }
     },
-    { asType: "generation" }
+    async (span) => {
+      let rawText = "";
+
+      try {
+        rawText = await generateChatText(profile, buildRecipePrompt(profile, recognizedItems), {
+          observationName: "generate-recipe-plan-model-call",
+          stage: "recipe",
+          includeImage: false,
+          responseSchema: dietPlanJsonSchema
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "菜谱生成失败";
+
+        span.setStatus({ code: 2, message });
+        span.setAttribute("diet.error", message);
+        throw error;
+      }
+
+      try {
+        const parsed = parseJsonWithSchema(rawText, dietPlanResultSchema);
+        setSpanAttributes(span, {
+          "diet.plan_title": parsed.planTitle,
+          "diet.recipe_count": parsed.recipeSuggestions.length,
+          "diet.repaired": false
+        });
+        logEvent("info", "Recipe generation completed", {
+          area: "diet-agent",
+          stage: "recipe",
+          recipe_count: parsed.recipeSuggestions.length,
+          repaired: false
+        });
+        return parsed;
+      } catch (error) {
+        const repaired = await repairJson(rawText, error, dietPlanResultSchema, options);
+        setSpanAttributes(span, {
+          "diet.plan_title": repaired.planTitle,
+          "diet.recipe_count": repaired.recipeSuggestions.length,
+          "diet.repaired": true
+        });
+        logEvent("info", "Recipe generation completed after repair", {
+          area: "diet-agent",
+          stage: "recipe",
+          recipe_count: repaired.recipeSuggestions.length,
+          repaired: true
+        });
+        return repaired;
+      }
+    }
   );
-
-  let rawText = "";
-
-  try {
-    rawText = await generateChatText(profile, buildRecipePrompt(profile, recognizedItems), {
-      observationName: "generate-recipe-plan-model-call",
-      stage: "recipe",
-      includeImage: false,
-      responseSchema: dietPlanJsonSchema
-    });
-  } catch (error) {
-    recipeGeneration.update({
-      level: "ERROR",
-      statusMessage: error instanceof Error ? error.message : "菜谱生成失败",
-      output: {
-        error: error instanceof Error ? error.message : String(error)
-      }
-    });
-    throw error;
-  }
-
-  try {
-    const parsed = parseJsonWithSchema(rawText, dietPlanResultSchema);
-    recipeGeneration.update({
-      output: {
-        planTitle: parsed.planTitle,
-        recipeCount: parsed.recipeSuggestions.length
-      }
-    });
-    return parsed;
-  } catch (error) {
-    const repaired = await repairJson(rawText, error, dietPlanResultSchema, options);
-    recipeGeneration.update({
-      output: {
-        planTitle: repaired.planTitle,
-        recipeCount: repaired.recipeSuggestions.length,
-        repaired: true
-      }
-    });
-    return repaired;
-  } finally {
-    recipeGeneration.end();
-  }
 }
 
 export async function runDietPlannerAgent(
@@ -862,102 +949,116 @@ export async function runDietPlannerAgent(
     stage: "started",
     message: "已收到订单和用户画像，开始生成。"
   });
+  logEvent("info", "Diet planner run started", {
+    area: "diet-agent",
+    stage: "started",
+    has_order_input: hasOrderInput(profile),
+    goals_count: profile.goals.length,
+    preferences_count: profile.preferences.length,
+    conditions_count: profile.conditions.length,
+    meal_plan_total: getMealPlanTotal(
+      normalizeMealPlanCounts(profile.mealPlanCounts, profile.generationScope)
+    )
+  });
 
-  return propagateAttributes(
-    {
-      userId: profile.name || undefined,
-      tags: ["diet-agent", "recipe-recommendation"]
-    },
-    async () =>
-      startActiveObservation(
-        "diet-planner-run",
-        async (rootObservation) => {
-          rootObservation.update({
-            input: serializeProfileForTelemetry(profile),
-            metadata: {
-              feature: "diet-recommendation"
+  return Sentry.withScope((scope) => {
+    scope.setTag("area", "diet-agent");
+    scope.setTag("feature", "diet-recommendation");
+    scope.setTag("agent", "recipe-recommendation");
+
+    if (profile.name) {
+      scope.setUser({ id: profile.name });
+    }
+
+    return Sentry.startSpan(
+      {
+        name: "diet-planner-run",
+        op: "ai.workflow",
+        attributes: {
+          "diet.feature": "diet-recommendation",
+          "diet.profile": truncateForDebug(serializeProfileForTelemetry(profile))
+        }
+      },
+      async (span) => {
+        try {
+          const recognizedItems = hasOrderInput(profile)
+            ? await recognizeItems(profile, options)
+            : [];
+
+          if (hasOrderInput(profile)) {
+            options?.onProgress?.({
+              stage: "recognition_completed",
+              message: `已识别 ${recognizedItems.length} 个食材，开始生成菜谱。`,
+              detail: {
+                recognizedItems
+              }
+            });
+          } else {
+            options?.onProgress?.({
+              stage: "recognition_completed",
+              message: "未提供购物清单，正在直接生成菜谱和建议采购清单。"
+            });
+          }
+
+          const plan = await generateRecipes(profile, recognizedItems, options);
+
+          options?.onProgress?.({
+            stage: "recipe_completed",
+            message: `已生成 ${plan.recipeSuggestions.length} 道菜谱，正在整理结果。`
+          });
+
+          options?.onProgress?.({
+            stage: "completed",
+            message: "菜谱推荐已完成。"
+          });
+
+          setSpanAttributes(span, {
+            "diet.recognized_count": recognizedItems.length,
+            "diet.recipe_count": plan.recipeSuggestions.length,
+            "diet.plan_title": plan.planTitle
+          });
+          logEvent("info", "Diet planner run completed", {
+            area: "diet-agent",
+            stage: "completed",
+            recognized_count: recognizedItems.length,
+            recipe_count: plan.recipeSuggestions.length
+          });
+
+          return plan;
+        } catch (error) {
+          const normalizedError =
+            error instanceof Error ? error : new Error(String(error));
+          const debugPayload =
+            error instanceof ModelResponseParseError ? error.debugPayload : undefined;
+
+          span.setStatus({ code: 2, message: normalizedError.message });
+          setSpanAttributes(span, {
+            "diet.error": normalizedError.message,
+            "diet.debug_payload": debugPayload
+          });
+          logEvent("error", "Diet planner run failed", {
+            area: "diet-agent",
+            stage: "failed",
+            error_name: normalizedError.name,
+            error_message: normalizedError.message,
+            has_debug_payload: Boolean(debugPayload)
+          });
+
+          captureException(normalizedError, {
+            tags: {
+              area: "diet-agent"
+            },
+            extra: {
+              profile: serializeProfileForTelemetry(profile),
+              debugPayload
             }
           });
 
-          try {
-            const recognizedItems = hasOrderInput(profile)
-              ? await recognizeItems(profile, options)
-              : [];
-
-            if (hasOrderInput(profile)) {
-              options?.onProgress?.({
-                stage: "recognition_completed",
-                message: `已识别 ${recognizedItems.length} 个食材，开始生成菜谱。`,
-                detail: {
-                  recognizedItems
-                }
-              });
-            } else {
-              options?.onProgress?.({
-                stage: "recognition_completed",
-                message: "未提供购物清单，正在直接生成菜谱和建议采购清单。"
-              });
-            }
-
-            const plan = await generateRecipes(profile, recognizedItems, options);
-
-            options?.onProgress?.({
-              stage: "recipe_completed",
-              message: `已生成 ${plan.recipeSuggestions.length} 道菜谱，正在整理结果。`
-            });
-
-            options?.onProgress?.({
-              stage: "completed",
-              message: "菜谱推荐已完成。"
-            });
-
-            rootObservation.update({
-              output: {
-                traceId: getActiveTraceId(),
-                recognizedCount: recognizedItems.length,
-                recipeCount: plan.recipeSuggestions.length,
-                planTitle: plan.planTitle
-              }
-            });
-
-            return plan;
-          } catch (error) {
-            const normalizedError =
-              error instanceof Error ? error : new Error(String(error));
-            const debugPayload =
-              error instanceof ModelResponseParseError ? error.debugPayload : undefined;
-
-            rootObservation.update({
-              level: "ERROR",
-              statusMessage: normalizedError.message,
-              output: {
-                traceId: getActiveTraceId(),
-                error: normalizedError.message,
-                ...(debugPayload ? { debugPayload } : {})
-              }
-            });
-
-            captureException(normalizedError, {
-              tags: {
-                area: "diet-agent",
-                trace_id: getActiveTraceId() || "unknown"
-              },
-              extra: {
-                profile: serializeProfileForTelemetry(profile),
-                debugPayload
-              }
-            });
-
-            throw new Error(
-              `推荐生成失败。系统已经尝试自动修复 JSON。原始原因：${normalizedError.message}`
-            );
-          } finally {
-            rootObservation.end();
-          }
-        },
-        {
-          endOnExit: false
+          throw new Error(
+            `推荐生成失败。系统已经尝试自动修复 JSON。原始原因：${normalizedError.message}`
+          );
         }
-      )
-  );
+      }
+    );
+  });
 }
